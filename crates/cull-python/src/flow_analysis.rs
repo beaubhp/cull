@@ -3,13 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use cull_core::{
     BindingId, BindingKind, BindingState, ContextFlowStatus, ContextId, DefinitionKind,
     FlowFailureReason, FlowUncertaintyKind, LocalReachability, LookupSemantics, ModuleId,
-    ReferenceBindingState, ReferenceId, ResidualLookup, Resolution, ScopeId, ScopeKind,
-    SemanticGraph, SemanticGraphBuilder, SymbolId, TextRange,
+    ReferenceBindingState, ReferenceId, ReferencePhase, ReferenceRole, ResidualLookup, Resolution,
+    ScopeId, ScopeKind, SemanticGraph, SemanticGraphBuilder, SymbolId, TextRange,
 };
 use ruff_python_ast::{
     Expr, ExprContext, FStringPart, InterpolatedStringElement, ModModule, Pattern, Stmt,
-    StmtClassDef, StmtFunctionDef,
+    StmtClassDef, StmtFunctionDef, TypeParam, UnaryOp,
 };
+use ruff_python_parser::parse_string_annotation;
 
 use crate::ruff_frontend::to_range;
 
@@ -17,6 +18,7 @@ pub(crate) fn analyze_module_flow(
     builder: &mut SemanticGraphBuilder,
     module: ModuleId,
     syntax: &ModModule,
+    source: &str,
 ) {
     let facts = FlowFacts::new(builder.graph(), module);
     let Some(module_context) = facts.module_context else {
@@ -26,6 +28,10 @@ pub(crate) fn analyze_module_flow(
     let mut analyzer = FlowAnalyzer {
         builder,
         facts,
+        source,
+        type_checking_symbols: BTreeSet::new(),
+        typing_module_symbols: BTreeSet::new(),
+        literal_symbols: BTreeSet::new(),
         unsupported_contexts: BTreeMap::new(),
     };
     let entry = analyzer.module_entry_env();
@@ -44,6 +50,7 @@ struct FlowFacts {
     symbol_scopes: BTreeMap<SymbolId, ScopeId>,
     symbols_by_scope: BTreeMap<ScopeId, BTreeSet<SymbolId>>,
     bindings: BTreeMap<BindingId, BindingInfo>,
+    bindings_by_symbol: BTreeMap<SymbolId, Vec<BindingId>>,
     bindings_by_range_kind: BTreeMap<RangeKindKey, Vec<BindingId>>,
     references: BTreeMap<ReferenceId, ReferenceInfo>,
     references_by_context_range_name: BTreeMap<ReferenceKey, ReferenceId>,
@@ -74,6 +81,11 @@ struct BindingInfo {
 struct ReferenceInfo {
     lexical_target: Resolution<SymbolId>,
     lookup: LookupSemantics,
+    phase: ReferencePhase,
+    role: ReferenceRole,
+    span: TextRange,
+    source_context: ContextId,
+    source_spelling: String,
 }
 
 #[derive(Clone, Copy)]
@@ -157,6 +169,7 @@ impl FlowFacts {
         }
 
         let mut bindings = BTreeMap::new();
+        let mut bindings_by_symbol: BTreeMap<SymbolId, Vec<BindingId>> = BTreeMap::new();
         let mut bindings_by_range_kind: BTreeMap<RangeKindKey, Vec<BindingId>> = BTreeMap::new();
         let mut parameter_bindings_by_scope: BTreeMap<ScopeId, Vec<BindingId>> = BTreeMap::new();
         for binding in graph
@@ -171,6 +184,10 @@ impl FlowFacts {
                     kind: binding.kind,
                 },
             );
+            bindings_by_symbol
+                .entry(binding.symbol)
+                .or_default()
+                .push(binding.id);
             bindings_by_range_kind
                 .entry(RangeKindKey::new(binding.name_range, binding.kind))
                 .or_default()
@@ -183,6 +200,9 @@ impl FlowFacts {
             }
         }
         for binding_ids in bindings_by_range_kind.values_mut() {
+            binding_ids.sort();
+        }
+        for binding_ids in bindings_by_symbol.values_mut() {
             binding_ids.sort();
         }
         for binding_ids in parameter_bindings_by_scope.values_mut() {
@@ -201,6 +221,11 @@ impl FlowFacts {
                 ReferenceInfo {
                     lexical_target: reference.lexical_target.clone(),
                     lookup: reference.lookup.clone(),
+                    phase: reference.phase,
+                    role: reference.role,
+                    span: reference.span,
+                    source_context: reference.source_context,
+                    source_spelling: reference.source_spelling.clone(),
                 },
             );
             references_by_context_range_name.insert(
@@ -239,7 +264,12 @@ impl FlowFacts {
             .scopes
             .iter()
             .filter(|scope| scope.module == module)
-            .filter(|scope| matches!(scope.kind, ScopeKind::Lambda | ScopeKind::Comprehension))
+            .filter(|scope| {
+                matches!(
+                    scope.kind,
+                    ScopeKind::Lambda | ScopeKind::Comprehension | ScopeKind::Annotation
+                )
+            })
         {
             anonymous_contexts_by_range_kind.insert(
                 AnonymousContextKey {
@@ -263,6 +293,7 @@ impl FlowFacts {
             symbol_scopes,
             symbols_by_scope,
             bindings,
+            bindings_by_symbol,
             bindings_by_range_kind,
             references,
             references_by_context_range_name,
@@ -287,6 +318,13 @@ impl FlowFacts {
     fn binding_ids(&self, range: TextRange, kind: BindingKind) -> Vec<BindingId> {
         self.bindings_by_range_kind
             .get(&RangeKindKey::new(range, kind))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn symbol_binding_ids(&self, symbol: SymbolId) -> Vec<BindingId> {
+        self.bindings_by_symbol
+            .get(&symbol)
             .cloned()
             .unwrap_or_default()
     }
@@ -317,7 +355,8 @@ impl FlowFacts {
         range: TextRange,
         source_spelling: &str,
     ) -> Option<ReferenceId> {
-        self.references_by_context_range_name
+        if let Some(reference) = self
+            .references_by_context_range_name
             .get(&ReferenceKey {
                 context,
                 start: range.start,
@@ -325,6 +364,20 @@ impl FlowFacts {
                 source_spelling: source_spelling.to_owned(),
             })
             .copied()
+        {
+            return Some(reference);
+        }
+
+        self.references
+            .iter()
+            .find(|(_, reference)| {
+                reference.source_context == context
+                    && reference.source_spelling == source_spelling
+                    && reference.role == ReferenceRole::Annotation
+                    && reference.span.start <= range.start
+                    && reference.span.end >= range.end
+            })
+            .map(|(id, _)| *id)
     }
 }
 
@@ -341,6 +394,10 @@ impl RangeKindKey {
 struct FlowAnalyzer<'a> {
     builder: &'a mut SemanticGraphBuilder,
     facts: FlowFacts,
+    source: &'a str,
+    type_checking_symbols: BTreeSet<SymbolId>,
+    typing_module_symbols: BTreeSet<SymbolId>,
+    literal_symbols: BTreeSet<SymbolId>,
     unsupported_contexts: BTreeMap<ContextId, FlowFailureReason>,
 }
 
@@ -627,6 +684,7 @@ impl FlowAnalyzer<'_> {
             }
             Stmt::AnnAssign(assign) => {
                 let mut env = env;
+                self.analyze_annotation_expr(&assign.annotation, context, env.clone());
                 if let Some(value) = &assign.value {
                     env = self.analyze_expr(value, context, env);
                 }
@@ -677,7 +735,11 @@ impl FlowAnalyzer<'_> {
                         .as_ref()
                         .map(|name| to_range(name.range))
                         .unwrap_or_else(|| to_range(alias.name.range));
+                    let bindings = self.facts.binding_ids(range, BindingKind::Import);
                     env = self.write_binding_at(range, BindingKind::Import, env);
+                    if matches!(alias.name.id.as_str(), "typing" | "typing_extensions") {
+                        self.insert_typing_module_symbols(bindings);
+                    }
                 }
                 FlowOutcome::normal(env)
             }
@@ -695,11 +757,33 @@ impl FlowAnalyzer<'_> {
                         .as_ref()
                         .map(|name| to_range(name.range))
                         .unwrap_or_else(|| to_range(alias.name.range));
+                    let bindings = self.facts.binding_ids(range, BindingKind::ImportFrom);
                     env = self.write_binding_at(range, BindingKind::ImportFrom, env);
+                    if import.module.as_ref().is_some_and(|module| {
+                        matches!(module.id.as_str(), "typing" | "typing_extensions")
+                    }) {
+                        match alias.name.id.as_str() {
+                            "TYPE_CHECKING" => self.insert_type_checking_symbols(bindings),
+                            "Literal" => self.insert_literal_symbols(bindings),
+                            _ => {}
+                        }
+                    }
                 }
                 FlowOutcome::normal(env)
             }
             Stmt::TypeAlias(alias) => {
+                if let Some(annotation) = self
+                    .facts
+                    .anonymous_context(to_range(alias.range), ScopeKind::Annotation)
+                {
+                    let mut annotation_env = self.deferred_entry_env(annotation.scope);
+                    annotation_env = self.analyze_type_params(
+                        alias.type_params.as_deref(),
+                        annotation.context,
+                        annotation_env,
+                    );
+                    self.analyze_annotation_expr(&alias.value, annotation.context, annotation_env);
+                }
                 FlowOutcome::normal(self.write_target(&alias.name, BindingKind::TypeAlias, env))
             }
             Stmt::Global(_) | Stmt::Nonlocal(_) | Stmt::Pass(_) | Stmt::IpyEscapeCommand(_) => {
@@ -723,6 +807,25 @@ impl FlowAnalyzer<'_> {
                 env = self.analyze_expr(default, context, env);
             }
         }
+        if let Some(annotation) = self
+            .facts
+            .anonymous_context(to_range(function.range), ScopeKind::Annotation)
+        {
+            let mut annotation_env = self.annotation_entry_env(annotation.scope, env.clone());
+            annotation_env = self.analyze_type_params(
+                function.type_params.as_deref(),
+                annotation.context,
+                annotation_env,
+            );
+            self.analyze_parameter_annotations(
+                &function.parameters,
+                annotation.context,
+                annotation_env.clone(),
+            );
+            if let Some(returns) = &function.returns {
+                self.analyze_annotation_expr(returns, annotation.context, annotation_env);
+            }
+        }
 
         let range = to_range(function.name.range);
         if let Some(definition) = self.facts.definition(range, DefinitionKind::Function) {
@@ -742,12 +845,40 @@ impl FlowAnalyzer<'_> {
         for decorator in &class.decorator_list {
             env = self.analyze_expr(&decorator.expression, context, env);
         }
+        let annotation = self
+            .facts
+            .anonymous_context(to_range(class.range), ScopeKind::Annotation);
+        let mut annotation_env =
+            annotation.map(|annotation| self.annotation_entry_env(annotation.scope, env.clone()));
+        if let Some(arguments) = &class.arguments {
+            if let Some(annotation) = annotation {
+                if let Some(env) = annotation_env.as_mut() {
+                    let mut current = std::mem::replace(env, FlowEnv::unreachable());
+                    current = self.analyze_type_params(
+                        class.type_params.as_deref(),
+                        annotation.context,
+                        current,
+                    );
+                    for base in &arguments.args {
+                        current = self.analyze_expr(base, annotation.context, current);
+                    }
+                    for keyword in &arguments.keywords {
+                        current = self.analyze_expr(&keyword.value, annotation.context, current);
+                    }
+                    *env = current;
+                }
+            }
+        }
         if let Some(arguments) = &class.arguments {
             for base in &arguments.args {
-                env = self.analyze_expr(base, context, env);
+                if class.type_params.is_none() {
+                    env = self.analyze_expr(base, context, env);
+                }
             }
             for keyword in &arguments.keywords {
-                env = self.analyze_expr(&keyword.value, context, env);
+                if class.type_params.is_none() {
+                    env = self.analyze_expr(&keyword.value, context, env);
+                }
             }
         }
 
@@ -820,6 +951,9 @@ impl FlowAnalyzer<'_> {
         context: ContextId,
         env: FlowEnv,
     ) -> FlowOutcome {
+        if let Some(condition) = self.type_checking_condition(&if_stmt.test, context) {
+            return self.analyze_type_checking_if(if_stmt, condition, context, env);
+        }
         let after_test = self.analyze_expr(&if_stmt.test, context, env);
         let mut joined = self.analyze_block(&if_stmt.body, context, after_test.clone());
         let mut fallthrough = Some(after_test);
@@ -844,6 +978,67 @@ impl FlowAnalyzer<'_> {
 
         join_option_env(&mut joined.normal, fallthrough);
         joined
+    }
+
+    fn analyze_type_checking_if(
+        &mut self,
+        if_stmt: &ruff_python_ast::StmtIf,
+        condition: TypeCheckingCondition,
+        context: ContextId,
+        env: FlowEnv,
+    ) -> FlowOutcome {
+        let after_test = self.analyze_expr(&if_stmt.test, context, env);
+        match condition {
+            TypeCheckingCondition::Positive => {
+                let _ = self.analyze_block(&if_stmt.body, context, after_test.clone());
+                let mut runtime = FlowOutcome::normal(after_test.clone());
+                for clause in &if_stmt.elif_else_clauses {
+                    if let Some(test) = &clause.test {
+                        let clause_entry = self.analyze_expr(test, context, after_test.clone());
+                        if self.type_checking_condition(test, context)
+                            == Some(TypeCheckingCondition::Positive)
+                        {
+                            let _ = self.analyze_block(&clause.body, context, clause_entry);
+                        } else {
+                            runtime.join_assign(self.analyze_block(
+                                &clause.body,
+                                context,
+                                clause_entry,
+                            ));
+                        }
+                    } else {
+                        runtime.join_assign(self.analyze_block(
+                            &clause.body,
+                            context,
+                            after_test.clone(),
+                        ));
+                    }
+                }
+                runtime
+            }
+            TypeCheckingCondition::Negative => {
+                let mut runtime = self.analyze_block(&if_stmt.body, context, after_test.clone());
+                for clause in &if_stmt.elif_else_clauses {
+                    if let Some(test) = &clause.test {
+                        let clause_entry = self.analyze_expr(test, context, after_test.clone());
+                        if self.type_checking_condition(test, context)
+                            == Some(TypeCheckingCondition::Positive)
+                        {
+                            let _ = self.analyze_block(&clause.body, context, clause_entry);
+                        } else {
+                            runtime.join_assign(self.analyze_block(
+                                &clause.body,
+                                context,
+                                clause_entry,
+                            ));
+                        }
+                    } else {
+                        let _ = self.analyze_block(&clause.body, context, after_test.clone());
+                    }
+                }
+                runtime
+            }
+        }
     }
 
     fn analyze_while(
@@ -1252,6 +1447,170 @@ impl FlowAnalyzer<'_> {
         })
     }
 
+    fn analyze_parameter_annotations(
+        &mut self,
+        parameters: &ruff_python_ast::Parameters,
+        context: ContextId,
+        env: FlowEnv,
+    ) {
+        for parameter in parameters.iter_source_order() {
+            if let Some(annotation) = parameter.annotation() {
+                self.analyze_annotation_expr(annotation, context, env.clone());
+            }
+        }
+    }
+
+    fn analyze_type_params(
+        &mut self,
+        type_params: Option<&ruff_python_ast::TypeParams>,
+        context: ContextId,
+        mut env: FlowEnv,
+    ) -> FlowEnv {
+        let Some(type_params) = type_params else {
+            return env;
+        };
+        for type_param in &type_params.type_params {
+            env = self.write_binding_at(
+                to_range(type_param.name().range),
+                BindingKind::TypeParameter,
+                env,
+            );
+            match type_param {
+                TypeParam::TypeVar(type_var) => {
+                    if let Some(bound) = &type_var.bound {
+                        self.analyze_annotation_expr(bound, context, env.clone());
+                    }
+                    if let Some(default) = &type_var.default {
+                        self.analyze_annotation_expr(default, context, env.clone());
+                    }
+                }
+                TypeParam::TypeVarTuple(type_var_tuple) => {
+                    if let Some(default) = &type_var_tuple.default {
+                        self.analyze_annotation_expr(default, context, env.clone());
+                    }
+                }
+                TypeParam::ParamSpec(param_spec) => {
+                    if let Some(default) = &param_spec.default {
+                        self.analyze_annotation_expr(default, context, env.clone());
+                    }
+                }
+            }
+        }
+        env
+    }
+
+    fn analyze_annotation_expr(&mut self, expression: &Expr, context: ContextId, env: FlowEnv) {
+        match expression {
+            Expr::Name(name) if matches!(name.ctx, ExprContext::Load) => {
+                self.record_reference(context, name.id.as_str(), to_range(name.range), &env);
+            }
+            Expr::Name(_) => {}
+            Expr::Attribute(expr) => self.analyze_annotation_expr(&expr.value, context, env),
+            Expr::Subscript(expr) => {
+                let value_is_literal = self.is_literal_annotation(&expr.value, context);
+                self.analyze_annotation_expr(&expr.value, context, env.clone());
+                if !value_is_literal {
+                    self.analyze_annotation_expr(&expr.slice, context, env);
+                }
+            }
+            Expr::StringLiteral(expr) => {
+                for string in &expr.value {
+                    if let Ok(parsed) = parse_string_annotation(self.source, string) {
+                        self.analyze_annotation_expr(
+                            &parsed.into_syntax().body,
+                            context,
+                            env.clone(),
+                        );
+                    }
+                }
+            }
+            Expr::BoolOp(expr) => {
+                for value in &expr.values {
+                    self.analyze_annotation_expr(value, context, env.clone());
+                }
+            }
+            Expr::BinOp(expr) => {
+                self.analyze_annotation_expr(&expr.left, context, env.clone());
+                self.analyze_annotation_expr(&expr.right, context, env);
+            }
+            Expr::UnaryOp(expr) => self.analyze_annotation_expr(&expr.operand, context, env),
+            Expr::If(expr) => {
+                self.analyze_annotation_expr(&expr.test, context, env.clone());
+                self.analyze_annotation_expr(&expr.body, context, env.clone());
+                self.analyze_annotation_expr(&expr.orelse, context, env);
+            }
+            Expr::Tuple(expr) => {
+                for element in &expr.elts {
+                    self.analyze_annotation_expr(element, context, env.clone());
+                }
+            }
+            Expr::List(expr) => {
+                for element in &expr.elts {
+                    self.analyze_annotation_expr(element, context, env.clone());
+                }
+            }
+            Expr::Set(expr) => {
+                for element in &expr.elts {
+                    self.analyze_annotation_expr(element, context, env.clone());
+                }
+            }
+            Expr::Dict(expr) => {
+                for item in &expr.items {
+                    if let Some(key) = &item.key {
+                        self.analyze_annotation_expr(key, context, env.clone());
+                    }
+                    self.analyze_annotation_expr(&item.value, context, env.clone());
+                }
+            }
+            Expr::Slice(expr) => {
+                if let Some(lower) = &expr.lower {
+                    self.analyze_annotation_expr(lower, context, env.clone());
+                }
+                if let Some(upper) = &expr.upper {
+                    self.analyze_annotation_expr(upper, context, env.clone());
+                }
+                if let Some(step) = &expr.step {
+                    self.analyze_annotation_expr(step, context, env);
+                }
+            }
+            Expr::Call(expr) => {
+                self.analyze_annotation_expr(&expr.func, context, env.clone());
+                for arg in &expr.arguments.args {
+                    self.analyze_annotation_expr(arg, context, env.clone());
+                }
+                for keyword in &expr.arguments.keywords {
+                    self.analyze_annotation_expr(&keyword.value, context, env.clone());
+                }
+            }
+            Expr::Starred(expr) => self.analyze_annotation_expr(&expr.value, context, env),
+            Expr::FString(expr) => {
+                let _ = self.analyze_interpolated_string(expr.value.as_slice(), context, env);
+            }
+            Expr::TString(expr) => {
+                let mut env = env;
+                for string in expr.value.as_slice() {
+                    env = self.analyze_interpolated_elements(&string.elements, context, env);
+                }
+            }
+            Expr::Lambda(_)
+            | Expr::Named(_)
+            | Expr::ListComp(_)
+            | Expr::SetComp(_)
+            | Expr::DictComp(_)
+            | Expr::Generator(_)
+            | Expr::Await(_)
+            | Expr::Yield(_)
+            | Expr::YieldFrom(_)
+            | Expr::Compare(_)
+            | Expr::BytesLiteral(_)
+            | Expr::NumberLiteral(_)
+            | Expr::BooleanLiteral(_)
+            | Expr::NoneLiteral(_)
+            | Expr::EllipsisLiteral(_)
+            | Expr::IpyEscapeCommand(_) => {}
+        }
+    }
+
     fn analyze_comprehension<F>(
         &mut self,
         range: TextRange,
@@ -1366,8 +1725,20 @@ impl FlowAnalyzer<'_> {
         }
     }
 
-    fn write_binding_at(&self, range: TextRange, kind: BindingKind, mut env: FlowEnv) -> FlowEnv {
+    fn write_binding_at(
+        &mut self,
+        range: TextRange,
+        kind: BindingKind,
+        mut env: FlowEnv,
+    ) -> FlowEnv {
         for binding in self.facts.binding_ids(range, kind) {
+            if !matches!(kind, BindingKind::Import | BindingKind::ImportFrom) {
+                if let Some(info) = self.facts.binding(binding) {
+                    self.type_checking_symbols.remove(&info.symbol);
+                    self.typing_module_symbols.remove(&info.symbol);
+                    self.literal_symbols.remove(&info.symbol);
+                }
+            }
             env.write_binding(&self.facts, binding);
         }
         env
@@ -1581,6 +1952,16 @@ impl FlowAnalyzer<'_> {
         env
     }
 
+    fn annotation_entry_env(&self, scope: ScopeId, outer: FlowEnv) -> FlowEnv {
+        let mut env = outer;
+        if let Some(symbols) = self.facts.symbols_by_scope.get(&scope) {
+            for symbol in symbols {
+                env.slots.insert(*symbol, SlotState::unbound());
+            }
+        }
+        env
+    }
+
     fn comprehension_entry_from_outer(&self, scope: ScopeId, outer: FlowEnv) -> FlowEnv {
         let mut env = outer;
         if let Some(symbols) = self.facts.symbols_by_scope.get(&scope) {
@@ -1648,11 +2029,43 @@ impl FlowAnalyzer<'_> {
             .map(|reference| reference.id)
             .collect::<Vec<_>>();
         for reference in reference_ids {
-            self.builder.set_reference_binding_state(
-                reference,
-                ReferenceBindingState::NotAnalyzed(FlowFailureReason::UnsupportedFlow),
-            );
+            let binding_state = self
+                .facts
+                .references
+                .get(&reference)
+                .cloned()
+                .and_then(|info| self.unvisited_annotation_binding_state(&info))
+                .unwrap_or(ReferenceBindingState::NotAnalyzed(
+                    FlowFailureReason::UnsupportedFlow,
+                ));
+            self.builder
+                .set_reference_binding_state(reference, binding_state);
         }
+    }
+
+    fn unvisited_annotation_binding_state(
+        &mut self,
+        reference: &ReferenceInfo,
+    ) -> Option<ReferenceBindingState> {
+        if !matches!(
+            reference.phase,
+            ReferencePhase::TypeOnly | ReferencePhase::LazyAnnotation
+        ) && reference.role != ReferenceRole::Annotation
+        {
+            return None;
+        }
+        let Resolution::Resolved(symbol) = &reference.lexical_target else {
+            return Some(ReferenceBindingState::NotAnalyzed(
+                FlowFailureReason::UnsupportedFlow,
+            ));
+        };
+        let bindings = self.facts.symbol_binding_ids(*symbol).into_iter().collect();
+        Some(self.binding_state_from_parts(
+            LocalReachability::MayExecute,
+            bindings,
+            ResidualLookup::None,
+            BTreeSet::new(),
+        ))
     }
 
     fn mark_context_unsupported(&mut self, context: ContextId, reason: FlowFailureReason) {
@@ -1687,12 +2100,116 @@ impl FlowAnalyzer<'_> {
             }
         }
     }
+
+    fn type_checking_condition(
+        &self,
+        expression: &Expr,
+        context: ContextId,
+    ) -> Option<TypeCheckingCondition> {
+        match expression {
+            Expr::Name(name)
+                if self
+                    .resolved_reference_symbol(context, to_range(name.range), name.id.as_str())
+                    .is_some_and(|symbol| self.type_checking_symbols.contains(&symbol)) =>
+            {
+                Some(TypeCheckingCondition::Positive)
+            }
+            Expr::Attribute(attribute)
+                if attribute.attr.id.as_str() == "TYPE_CHECKING"
+                    && matches!(
+                        attribute.value.as_ref(),
+                        Expr::Name(name)
+                            if self
+                                .resolved_reference_symbol(
+                                    context,
+                                    to_range(name.range),
+                                    name.id.as_str(),
+                                )
+                                .is_some_and(|symbol| self.typing_module_symbols.contains(&symbol))
+                    ) =>
+            {
+                Some(TypeCheckingCondition::Positive)
+            }
+            Expr::UnaryOp(unary) if unary.op == UnaryOp::Not => self
+                .type_checking_condition(&unary.operand, context)
+                .map(|condition| match condition {
+                    TypeCheckingCondition::Positive => TypeCheckingCondition::Negative,
+                    TypeCheckingCondition::Negative => TypeCheckingCondition::Positive,
+                }),
+            _ => None,
+        }
+    }
+
+    fn insert_type_checking_symbols(&mut self, bindings: Vec<BindingId>) {
+        for binding in bindings {
+            if let Some(info) = self.facts.binding(binding) {
+                self.type_checking_symbols.insert(info.symbol);
+            }
+        }
+    }
+
+    fn insert_typing_module_symbols(&mut self, bindings: Vec<BindingId>) {
+        for binding in bindings {
+            if let Some(info) = self.facts.binding(binding) {
+                self.typing_module_symbols.insert(info.symbol);
+            }
+        }
+    }
+
+    fn insert_literal_symbols(&mut self, bindings: Vec<BindingId>) {
+        for binding in bindings {
+            if let Some(info) = self.facts.binding(binding) {
+                self.literal_symbols.insert(info.symbol);
+            }
+        }
+    }
+
+    fn is_literal_annotation(&self, expression: &Expr, context: ContextId) -> bool {
+        match expression {
+            Expr::Name(name) => self
+                .resolved_reference_symbol(context, to_range(name.range), name.id.as_str())
+                .is_some_and(|symbol| self.literal_symbols.contains(&symbol)),
+            Expr::Attribute(attribute) if attribute.attr.id.as_str() == "Literal" => {
+                matches!(
+                    attribute.value.as_ref(),
+                    Expr::Name(name)
+                        if self
+                            .resolved_reference_symbol(
+                                context,
+                                to_range(name.range),
+                                name.id.as_str(),
+                            )
+                            .is_some_and(|symbol| self.typing_module_symbols.contains(&symbol))
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn resolved_reference_symbol(
+        &self,
+        context: ContextId,
+        range: TextRange,
+        source_spelling: &str,
+    ) -> Option<SymbolId> {
+        let reference = self.facts.reference(context, range, source_spelling)?;
+        match &self.facts.references.get(&reference)?.lexical_target {
+            Resolution::Resolved(symbol) => Some(*symbol),
+            Resolution::Ambiguous(_) | Resolution::External | Resolution::Unresolved(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 enum LookupMode {
     Direct,
     GlobalThenBuiltin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypeCheckingCondition {
+    Positive,
+    Negative,
 }
 
 fn residual_for_slot(slot: &SlotState, mode: LookupMode) -> ResidualLookup {

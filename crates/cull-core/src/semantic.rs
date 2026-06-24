@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BindingId, BindingSetId, ContextId, DefId, DefinitionKind, FileId, FlowUncertaintySetId,
-    LoopId, ModuleId, ReferenceId, ScopeId, SymbolId, TextRange,
+    BindingId, BindingSetId, ContextId, DefId, DefinitionEffectSetId, DefinitionKind, FileId,
+    FlowUncertaintySetId, InternalCandidateId, LoopId, ModuleId, OverloadGroupId, ReferenceId,
+    ScopeId, SymbolId, TextRange,
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -19,6 +20,9 @@ pub struct SemanticGraph {
     pub definitions: Vec<SemanticDefinition>,
     pub references: Vec<ReferenceFact>,
     pub context_flow_statuses: Vec<ContextFlowStatusFact>,
+    pub definition_effect_sets: Vec<DefinitionEffectSetFact>,
+    pub overload_groups: Vec<OverloadGroupFact>,
+    pub internal_candidates: Vec<InternalCandidateFact>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -28,6 +32,8 @@ pub struct SemanticModule {
     pub name: String,
     pub path: String,
     pub future_annotations: bool,
+    pub origin_domain: OriginDomain,
+    pub origin_evidence: OriginEvidence,
     pub scope: ScopeId,
     pub context: ContextId,
 }
@@ -54,6 +60,7 @@ pub enum ScopeKind {
     Class,
     Lambda,
     Comprehension,
+    Annotation,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -77,6 +84,7 @@ pub enum ContextKind {
     ClassBody,
     LambdaBody,
     ComprehensionBody,
+    Annotation,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -128,6 +136,7 @@ pub enum BindingKind {
     ExceptTarget,
     MatchCapture,
     NamedExpression,
+    TypeParameter,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -144,6 +153,12 @@ pub struct SemanticDefinition {
     pub name_range: TextRange,
     pub reportable: bool,
     pub is_async: bool,
+    pub role: DefinitionRole,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overload_group: Option<OverloadGroupId>,
+    pub definition_effects: DefinitionEffectSetId,
+    pub removal_risk: RemovalRisk,
+    pub origin_domain: OriginDomain,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -160,6 +175,8 @@ pub struct ReferenceFact {
     pub phase: ReferencePhase,
     pub role: ReferenceRole,
     pub origin_domain: OriginDomain,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotation_semantics: Option<AnnotationSemantics>,
     pub span: TextRange,
 }
 
@@ -181,6 +198,7 @@ pub enum UnresolvedReason {
     MissingNonlocalBinding,
     ConflictingDeclaration,
     DeferredAnnotation,
+    UnsupportedAnnotation,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -245,6 +263,7 @@ pub enum FlowUncertaintyKind {
     ComplexExceptionFlow,
     FailedPartialMatch,
     UnsupportedFlow,
+    UnsupportedAnnotation,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -264,6 +283,7 @@ pub enum ContextFlowStatus {
 #[serde(rename_all = "snake_case", tag = "kind", content = "detail")]
 pub enum FlowFailureReason {
     ResourceBudgetExceeded(FlowResourceBudget),
+    UnsupportedAnnotation,
     UnsupportedFlow,
 }
 
@@ -291,17 +311,29 @@ pub enum CompletionKind {
 pub enum ReferencePhase {
     DefinitionTime,
     BodyRuntime,
+    TypeOnly,
+    LazyAnnotation,
+    ImportTime,
+    ExportSurface,
+    Root,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceRole {
     Value,
+    Call,
+    Import,
+    ModuleAttribute,
+    Export,
     Decorator,
     DefaultValue,
+    Annotation,
     BaseClass,
     ClassKeyword,
+    Metaclass,
     ComprehensionIterable,
+    ConfiguredRoot,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -312,11 +344,119 @@ pub enum OriginDomain {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OriginEvidence {
+    CullConfiguration,
+    PytestTestPath,
+    TestsDirectory,
+    PytestFilenamePattern,
+    DefaultProduction,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationEvaluation {
+    Eager,
+    Stringified,
+    Deferred,
+    NeverEvaluated,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AnnotationSemantics {
+    pub evaluation: AnnotationEvaluation,
+    pub phase: ReferencePhase,
+    pub scope: ScopeId,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefinitionRole {
+    Normal,
+    OverloadDeclaration,
+    OverloadImplementation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefinitionEffectKind {
+    DecoratorApplication,
+    DefaultExpressionEvaluation,
+    EagerAnnotationEvaluation,
+    ClassBaseEvaluation,
+    ClassKeywordEvaluation,
+    MetaclassEvaluation,
+    ClassBodyExecution,
+    LazyAnnotationIntrospectionRisk,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DefinitionEffectSetFact {
+    pub id: DefinitionEffectSetId,
+    pub effects: Vec<DefinitionEffectKind>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "risk", content = "effects")]
+pub enum RemovalRisk {
+    NoKnownDefinitionEffects,
+    Review(DefinitionEffectSetId),
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OverloadGroupFact {
+    pub id: OverloadGroupId,
+    pub scope: ScopeId,
+    pub name: String,
+    pub declarations: Vec<DefId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<DefId>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalCandidateRule {
+    UnreferencedFunction,
+    UnreferencedClass,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalCandidateDisposition {
+    Candidate,
+    Suppressed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalCandidateReason {
+    NoSameModuleReferences,
+    HasSameModuleReferences,
+    NonReportableDefinition,
+    OverloadDeclaration,
+    UnresolvedOrUnsupportedReference,
+    CrossModuleAnalysisDeferred,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InternalCandidateFact {
+    pub id: InternalCandidateId,
+    pub definition: DefId,
+    pub rule: InternalCandidateRule,
+    pub disposition: InternalCandidateDisposition,
+    pub reasons: Vec<InternalCandidateReason>,
+    pub inbound_references: Vec<ReferenceId>,
+    pub removal_risk: RemovalRisk,
+}
+
 #[derive(Debug, Default)]
 pub struct SemanticGraphBuilder {
     graph: SemanticGraph,
     symbols_by_scope_name: BTreeMap<(ScopeId, String), SymbolId>,
     binding_sets_by_bindings: BTreeMap<Vec<BindingId>, BindingSetId>,
+    definition_effect_sets_by_kinds: BTreeMap<Vec<DefinitionEffectKind>, DefinitionEffectSetId>,
     flow_uncertainty_sets_by_kinds: BTreeMap<Vec<FlowUncertaintyKind>, FlowUncertaintySetId>,
     last_binding_by_symbol: BTreeMap<SymbolId, BindingId>,
     next_binding_order_by_module: BTreeMap<ModuleId, u32>,
@@ -418,6 +558,7 @@ impl SemanticGraphBuilder {
 
     pub fn add_definition(&mut self, input: DefinitionInput) -> DefId {
         let id = DefId::new(self.graph.definitions.len() as u32);
+        let no_effects = self.intern_definition_effect_set([]);
         self.graph.definitions.push(SemanticDefinition {
             id,
             module: input.module,
@@ -431,6 +572,11 @@ impl SemanticGraphBuilder {
             name_range: input.name_range,
             reportable: input.reportable,
             is_async: input.is_async,
+            role: DefinitionRole::Normal,
+            overload_group: None,
+            definition_effects: no_effects,
+            removal_risk: RemovalRisk::NoKnownDefinitionEffects,
+            origin_domain: input.origin_domain,
         });
 
         self.binding_mut(input.binding).definition = Some(id);
@@ -455,6 +601,7 @@ impl SemanticGraphBuilder {
             phase: input.phase,
             role: input.role,
             origin_domain: input.origin_domain,
+            annotation_semantics: input.annotation_semantics,
             span: input.span,
         });
         id
@@ -505,6 +652,29 @@ impl SemanticGraphBuilder {
         id
     }
 
+    pub fn intern_definition_effect_set<I>(&mut self, effects: I) -> DefinitionEffectSetId
+    where
+        I: IntoIterator<Item = DefinitionEffectKind>,
+    {
+        let mut effects = effects.into_iter().collect::<Vec<_>>();
+        effects.sort();
+        effects.dedup();
+
+        if let Some(id) = self.definition_effect_sets_by_kinds.get(&effects) {
+            return *id;
+        }
+
+        let id = DefinitionEffectSetId::new(self.graph.definition_effect_sets.len() as u32);
+        self.graph
+            .definition_effect_sets
+            .push(DefinitionEffectSetFact {
+                id,
+                effects: effects.clone(),
+            });
+        self.definition_effect_sets_by_kinds.insert(effects, id);
+        id
+    }
+
     pub fn set_reference_binding_state(
         &mut self,
         reference: ReferenceId,
@@ -524,6 +694,63 @@ impl SemanticGraphBuilder {
         }
     }
 
+    pub fn set_definition_effects(
+        &mut self,
+        definition: DefId,
+        effects: DefinitionEffectSetId,
+        removal_risk: RemovalRisk,
+    ) {
+        let definition = self.definition_mut(definition);
+        definition.definition_effects = effects;
+        definition.removal_risk = removal_risk;
+    }
+
+    pub fn set_definition_role(
+        &mut self,
+        definition: DefId,
+        role: DefinitionRole,
+        overload_group: Option<OverloadGroupId>,
+    ) {
+        let definition = self.definition_mut(definition);
+        definition.role = role;
+        definition.overload_group = overload_group;
+        if role == DefinitionRole::OverloadDeclaration {
+            definition.reportable = false;
+        }
+    }
+
+    pub fn add_overload_group(
+        &mut self,
+        scope: ScopeId,
+        name: String,
+        declarations: Vec<DefId>,
+        implementation: Option<DefId>,
+    ) -> OverloadGroupId {
+        let id = OverloadGroupId::new(self.graph.overload_groups.len() as u32);
+        self.graph.overload_groups.push(OverloadGroupFact {
+            id,
+            scope,
+            name,
+            declarations,
+            implementation,
+        });
+        id
+    }
+
+    pub fn add_internal_candidate(&mut self, input: InternalCandidateInput) -> InternalCandidateId {
+        let id = InternalCandidateId::new(self.graph.internal_candidates.len() as u32);
+        self.graph.internal_candidates.push(InternalCandidateFact {
+            id,
+            definition: input.definition,
+            rule: input.rule,
+            disposition: input.disposition,
+            reasons: input.reasons,
+            inbound_references: input.inbound_references,
+            removal_risk: input.removal_risk,
+        });
+        id
+    }
+
     fn binding_mut(&mut self, id: BindingId) -> &mut BindingFact {
         &mut self.graph.bindings[id.as_u32() as usize]
     }
@@ -534,6 +761,10 @@ impl SemanticGraphBuilder {
 
     fn context_mut(&mut self, id: ContextId) -> &mut ContextFact {
         &mut self.graph.contexts[id.as_u32() as usize]
+    }
+
+    fn definition_mut(&mut self, id: DefId) -> &mut SemanticDefinition {
+        &mut self.graph.definitions[id.as_u32() as usize]
     }
 
     fn reference_mut(&mut self, id: ReferenceId) -> &mut ReferenceFact {
@@ -577,6 +808,7 @@ pub struct DefinitionInput {
     pub name_range: TextRange,
     pub reportable: bool,
     pub is_async: bool,
+    pub origin_domain: OriginDomain,
 }
 
 #[derive(Clone, Debug)]
@@ -592,5 +824,16 @@ pub struct ReferenceInput {
     pub phase: ReferencePhase,
     pub role: ReferenceRole,
     pub origin_domain: OriginDomain,
+    pub annotation_semantics: Option<AnnotationSemantics>,
     pub span: TextRange,
+}
+
+#[derive(Clone, Debug)]
+pub struct InternalCandidateInput {
+    pub definition: DefId,
+    pub rule: InternalCandidateRule,
+    pub disposition: InternalCandidateDisposition,
+    pub reasons: Vec<InternalCandidateReason>,
+    pub inbound_references: Vec<ReferenceId>,
+    pub removal_risk: RemovalRisk,
 }

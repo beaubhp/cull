@@ -4,6 +4,7 @@ mod decode;
 mod discovery;
 mod flow_analysis;
 mod frontend;
+mod part1d_evidence;
 mod paths;
 mod ruff_frontend;
 mod semantic_inventory;

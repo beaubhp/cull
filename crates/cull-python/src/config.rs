@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use cull_core::PythonVersion;
+use cull_core::{OriginEvidence, PythonVersion};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -9,6 +9,8 @@ pub struct ProjectConfig {
     pub source_roots: Vec<String>,
     pub excludes: Vec<String>,
     pub target_python: Option<PythonVersion>,
+    pub test_paths: Vec<String>,
+    pub test_path_origin_evidence: Option<OriginEvidence>,
 }
 
 impl ProjectConfig {
@@ -17,6 +19,8 @@ impl ProjectConfig {
             source_roots: Vec::new(),
             excludes: Vec::new(),
             target_python: None,
+            test_paths: Vec::new(),
+            test_path_origin_evidence: None,
         }
     }
 }
@@ -56,11 +60,31 @@ pub fn load_project_config(project_root: &Path) -> Result<ProjectConfig, ConfigE
 
     let text = fs::read_to_string(path)?;
     let pyproject: PyProject = toml::from_str(&text)?;
+    let pytest_test_paths = pyproject
+        .tool
+        .as_ref()
+        .and_then(|tool| tool.pytest.as_ref())
+        .and_then(|pytest| pytest.ini_options.as_ref())
+        .and_then(|options| options.testpaths.clone())
+        .map(StringOrVec::into_vec)
+        .unwrap_or_default();
+    let pytest_test_path_origin_evidence =
+        (!pytest_test_paths.is_empty()).then_some(OriginEvidence::PytestTestPath);
+
     let Some(tool) = pyproject.tool else {
         return Ok(ProjectConfig::empty());
     };
     let Some(cull) = tool.cull else {
-        return Ok(ProjectConfig::empty());
+        let mut config = ProjectConfig::empty();
+        config.test_paths = pytest_test_paths;
+        config.test_path_origin_evidence = pytest_test_path_origin_evidence;
+        return Ok(config);
+    };
+    let cull_test_paths = cull.tests.map(StringOrVec::into_vec);
+    let (test_paths, test_path_origin_evidence) = if let Some(paths) = cull_test_paths {
+        (paths, Some(OriginEvidence::CullConfiguration))
+    } else {
+        (pytest_test_paths, pytest_test_path_origin_evidence)
     };
 
     Ok(ProjectConfig {
@@ -70,6 +94,8 @@ pub fn load_project_config(project_root: &Path) -> Result<ProjectConfig, ConfigE
             .target_python
             .or(cull.target_version)
             .and_then(|value| value.parse().ok()),
+        test_paths,
+        test_path_origin_evidence,
     })
 }
 
@@ -81,6 +107,7 @@ struct PyProject {
 #[derive(Debug, Deserialize)]
 struct Tool {
     cull: Option<ToolCull>,
+    pytest: Option<ToolPytest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,9 +116,20 @@ struct ToolCull {
     exclude: Option<Vec<String>>,
     target_python: Option<String>,
     target_version: Option<String>,
+    tests: Option<StringOrVec>,
 }
 
 #[derive(Debug, Deserialize)]
+struct ToolPytest {
+    ini_options: Option<PytestIniOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PytestIniOptions {
+    testpaths: Option<StringOrVec>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 enum StringOrVec {
     One(String),

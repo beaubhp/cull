@@ -18,6 +18,8 @@
       "name": "pkg",
       "path": "src/pkg/__init__.py",
       "future_annotations": false,
+      "origin_domain": "production",
+      "origin_evidence": "default_production",
       "scope": 0,
       "context": 0
     },
@@ -27,6 +29,8 @@
       "name": "pkg.sample",
       "path": "src/pkg/sample.py",
       "future_annotations": false,
+      "origin_domain": "production",
+      "origin_evidence": "default_production",
       "scope": 1,
       "context": 1
     }
@@ -588,7 +592,13 @@
         "end": 21
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 1,
@@ -608,7 +618,13 @@
         "end": 76
       },
       "reportable": false,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 2,
@@ -628,7 +644,13 @@
         "end": 132
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 3,
@@ -648,7 +670,14 @@
         "end": 180
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 1,
+      "removal_risk": {
+        "risk": "review",
+        "effects": 1
+      },
+      "origin_domain": "production"
     },
     {
       "id": 4,
@@ -668,7 +697,13 @@
         "end": 213
       },
       "reportable": false,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     }
   ],
   "diagnostics": []

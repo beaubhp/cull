@@ -3,7 +3,7 @@
 Document type: implementation plan  
 Status: build sequence for frozen v0 scope  
 Audience: implementation, review, benchmarking, and release decisions  
-Last updated: 2026-06-23
+Last updated: 2026-06-24
 
 ## Purpose
 
@@ -399,6 +399,7 @@ Minimum roles:
 - annotation
 - base class
 - class keyword
+- metaclass
 - configured root
 
 Minimum origin domains:
@@ -446,13 +447,20 @@ make every contained definition reachable from a recognized root.
 
 Annotation semantics are target-version-aware.
 
-Cull models annotation evaluation as:
+Cull models annotation evaluation per annotation site:
 
 ```rust
-enum AnnotationModel {
+struct AnnotationSemantics {
+    evaluation: AnnotationEvaluation,
+    phase: ReferencePhase,
+    scope: ScopeId,
+}
+
+enum AnnotationEvaluation {
     Eager,
     Stringified,
     Deferred,
+    NeverEvaluated,
 }
 ```
 
@@ -468,6 +476,10 @@ Policy:
 - eager annotations are definition-time references
 - stringified annotations are type-only unless parsed and modeled more precisely
 - deferred annotations are lazy-annotation references
+- function-local variable annotations are never runtime-evaluated or stored
+- `type Alias = ...` values are lazy from Python 3.12
+- type-parameter bounds and constraints are lazy from Python 3.12
+- type-parameter defaults are lazy from Python 3.13
 - `if TYPE_CHECKING:` references are type-only
 - uncertain annotation semantics downgrade affected conclusions
 
@@ -1013,6 +1025,30 @@ manufacturing precision across branches, loops, suspension, exceptions, pattern 
 namespace effects. Unsupported contexts are explicit and fail closed. No public findings are
 emitted.
 
+Part 1D is the final Part 1 slice. It completes the annotation and evidence facts that Part 1
+requires, using 1D-A through 1D-E only as internal implementation checkpoints:
+
+- **Part 1D-A: Annotation model and scopes.** Site-aware annotation semantics, annotation scopes and
+  contexts, type-parameter bindings in annotation scopes, type-only and lazy-annotation phases,
+  annotation roles, and the Python 3.10 through 3.14 semantic matrix.
+- **Part 1D-B: Annotation collection.** Function parameter and return annotations, module/class/local
+  annotated assignments, type aliases, type-parameter bounds and defaults, and explicit quoted
+  forward references.
+- **Part 1D-C: Flow integration.** Eager annotation references enter definition-time flow,
+  stringified references become type-only, deferred references become lazy-annotation references,
+  and type-only or lazy references prevent unreferenced classification without establishing ordinary
+  runtime reachability.
+- **Part 1D-D: Domains and semantic forms.** Symbol-proven `TYPE_CHECKING`, `Literal`, and overload
+  handling, deterministic production/test origin evidence, overload grouping or suppression, and
+  missing-overload implementation diagnostics.
+- **Part 1D-E: Evidence and internal validation.** Definition-effect facts, removal-risk summaries,
+  metaclass effects, fail-closed internal candidate facts and snapshots, CPython oracle checks where
+  applicable, deterministic output, and the implementation note.
+
+Part 1D does not resolve cross-module imports, model exports, infer roots, introduce public
+findings, or create a stable public candidate-debug schema. After Part 1D passes its completion gate,
+Part 1 is complete and the next major phase is Part 2.
+
 ### Acceptance Criteria
 
 Part 1 is complete when:
@@ -1027,7 +1063,8 @@ Part 1 is complete when:
 7. Removal risk is recorded separately from unusedness confidence.
 8. `typing.overload` declarations are grouped with their implementation or suppressed as
    non-reportable.
-9. Internal candidate snapshots contain no known same-module false positives.
+9. Internal candidate snapshots contain no known same-module false positives, including residual
+   runtime lookup, flow uncertainty, unsupported annotation, and class-body fallback cases.
 10. Methods and nested functions remain non-reportable.
 11. Normal multi-module `cull check` does not emit high-confidence project-wide findings.
 

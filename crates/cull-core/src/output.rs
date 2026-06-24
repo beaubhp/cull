@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BindingFact, BindingSetFact, ContextFact, ContextFlowStatusFact, DefinitionKind, Diagnostic,
-    FlowUncertaintySetFact, PythonVersion, ReferenceFact, ScopeFact, SemanticDefinition,
-    SymbolFact, TextRange,
+    FlowUncertaintySetFact, InternalCandidateFact, OriginDomain, OriginEvidence, OverloadGroupFact,
+    PythonVersion, ReferenceFact, ScopeFact, SemanticDefinition, SymbolFact, TextRange,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -44,6 +44,8 @@ pub struct DebugBindingModule {
     pub name: String,
     pub path: String,
     pub future_annotations: bool,
+    pub origin_domain: OriginDomain,
+    pub origin_evidence: OriginEvidence,
     pub scope: crate::ScopeId,
     pub context: crate::ContextId,
 }
@@ -64,6 +66,9 @@ pub struct DebugReferencesOutput {
     pub definitions: Vec<SemanticDefinition>,
     pub references: Vec<ReferenceFact>,
     pub context_flow_statuses: Vec<ContextFlowStatusFact>,
+    pub definition_effect_sets: Vec<crate::DefinitionEffectSetFact>,
+    pub overload_groups: Vec<OverloadGroupFact>,
+    pub internal_candidates: Vec<InternalCandidateFact>,
     pub diagnostics: Vec<Diagnostic>,
 }
 

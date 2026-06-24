@@ -4,7 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use cull_core::{Diagnostic, FileId, ModuleId, PythonVersion, SourceRootOutput};
+use cull_core::{
+    Diagnostic, FileId, ModuleId, OriginDomain, OriginEvidence, PythonVersion, SourceRootOutput,
+};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
@@ -72,6 +74,8 @@ pub struct DiscoveredModule {
     pub name: String,
     pub path: PathBuf,
     pub display_path: String,
+    pub origin_domain: OriginDomain,
+    pub origin_evidence: OriginEvidence,
 }
 
 #[derive(Debug, Error)]
@@ -161,6 +165,9 @@ pub fn discover_project(options: DiscoveryOptions) -> Result<DiscoveredProject, 
         .map(|(index, mut module)| {
             module.id = ModuleId::new(index as u32);
             module.file = FileId::new(index as u32);
+            let (origin_domain, origin_evidence) = classify_origin(&module.display_path, &config);
+            module.origin_domain = origin_domain;
+            module.origin_evidence = origin_evidence;
             module
         })
         .collect();
@@ -277,8 +284,43 @@ fn collect_modules(
             name,
             path: entry.path().to_path_buf(),
             display_path: relative_slash_path(project_root, entry.path()),
+            origin_domain: OriginDomain::Production,
+            origin_evidence: OriginEvidence::DefaultProduction,
         });
     }
+}
+
+fn classify_origin(
+    display_path: &str,
+    config: &crate::config::ProjectConfig,
+) -> (OriginDomain, OriginEvidence) {
+    for path in &config.test_paths {
+        let normalized = path.trim_matches('/');
+        if !normalized.is_empty()
+            && (display_path == normalized || display_path.starts_with(&format!("{normalized}/")))
+        {
+            return (
+                OriginDomain::Test,
+                config
+                    .test_path_origin_evidence
+                    .unwrap_or(OriginEvidence::CullConfiguration),
+            );
+        }
+    }
+
+    if display_path.contains("/tests/") || display_path.starts_with("tests/") {
+        return (OriginDomain::Test, OriginEvidence::TestsDirectory);
+    }
+
+    let filename = Path::new(display_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(display_path);
+    if filename.starts_with("test_") || filename.ends_with("_test.py") {
+        return (OriginDomain::Test, OriginEvidence::PytestFilenamePattern);
+    }
+
+    (OriginDomain::Production, OriginEvidence::DefaultProduction)
 }
 
 fn should_visit_entry(

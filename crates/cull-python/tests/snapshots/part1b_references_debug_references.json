@@ -18,6 +18,8 @@
       "name": "pkg",
       "path": "src/pkg/__init__.py",
       "future_annotations": false,
+      "origin_domain": "production",
+      "origin_evidence": "default_production",
       "scope": 0,
       "context": 0
     },
@@ -27,6 +29,8 @@
       "name": "pkg.refs",
       "path": "src/pkg/refs.py",
       "future_annotations": false,
+      "origin_domain": "production",
+      "origin_evidence": "default_production",
       "scope": 1,
       "context": 1
     }
@@ -932,7 +936,14 @@
         "end": 160
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 1,
+      "removal_risk": {
+        "risk": "review",
+        "effects": 1
+      },
+      "origin_domain": "production"
     },
     {
       "id": 1,
@@ -952,7 +963,14 @@
         "end": 280
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 2,
+      "removal_risk": {
+        "risk": "review",
+        "effects": 2
+      },
+      "origin_domain": "production"
     },
     {
       "id": 2,
@@ -972,7 +990,13 @@
         "end": 490
       },
       "reportable": false,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     }
   ],
   "references": [
@@ -1383,7 +1407,7 @@
         }
       },
       "phase": "definition_time",
-      "role": "class_keyword",
+      "role": "metaclass",
       "origin_domain": "production",
       "span": {
         "start": 302,
@@ -1793,6 +1817,74 @@
       "context": 7,
       "status": {
         "status": "complete"
+      }
+    }
+  ],
+  "definition_effect_sets": [
+    {
+      "id": 0,
+      "effects": []
+    },
+    {
+      "id": 1,
+      "effects": [
+        "decorator_application",
+        "default_expression_evaluation"
+      ]
+    },
+    {
+      "id": 2,
+      "effects": [
+        "decorator_application",
+        "class_base_evaluation",
+        "metaclass_evaluation",
+        "class_body_execution"
+      ]
+    }
+  ],
+  "overload_groups": [],
+  "internal_candidates": [
+    {
+      "id": 0,
+      "definition": 0,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "review",
+        "effects": 1
+      }
+    },
+    {
+      "id": 1,
+      "definition": 1,
+      "rule": "unreferenced_class",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "review",
+        "effects": 2
+      }
+    },
+    {
+      "id": 2,
+      "definition": 2,
+      "rule": "unreferenced_function",
+      "disposition": "suppressed",
+      "reasons": [
+        "non_reportable_definition"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
       }
     }
   ],

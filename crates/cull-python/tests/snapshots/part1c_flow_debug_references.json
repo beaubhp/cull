@@ -18,6 +18,8 @@
       "name": "pkg",
       "path": "src/pkg/__init__.py",
       "future_annotations": false,
+      "origin_domain": "production",
+      "origin_evidence": "default_production",
       "scope": 0,
       "context": 0
     },
@@ -27,6 +29,8 @@
       "name": "pkg.flow",
       "path": "src/pkg/flow.py",
       "future_annotations": false,
+      "origin_domain": "production",
+      "origin_evidence": "default_production",
       "scope": 1,
       "context": 1
     }
@@ -1613,7 +1617,13 @@
         "end": 152
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 1,
@@ -1633,7 +1643,13 @@
         "end": 265
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 2,
@@ -1653,7 +1669,13 @@
         "end": 460
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 3,
@@ -1673,7 +1695,13 @@
         "end": 556
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 4,
@@ -1693,7 +1721,13 @@
         "end": 621
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 5,
@@ -1713,7 +1747,13 @@
         "end": 784
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 6,
@@ -1733,7 +1773,13 @@
         "end": 912
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 7,
@@ -1753,7 +1799,13 @@
         "end": 954
       },
       "reportable": false,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 8,
@@ -1773,7 +1825,13 @@
         "end": 1104
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 9,
@@ -1793,7 +1851,13 @@
         "end": 1300
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 0,
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      },
+      "origin_domain": "production"
     },
     {
       "id": 10,
@@ -1813,7 +1877,14 @@
         "end": 1472
       },
       "reportable": true,
-      "is_async": false
+      "is_async": false,
+      "role": "normal",
+      "definition_effects": 1,
+      "removal_risk": {
+        "risk": "review",
+        "effects": 1
+      },
+      "origin_domain": "production"
     }
   ],
   "references": [
@@ -3527,6 +3598,177 @@
       "context": 14,
       "status": {
         "status": "complete"
+      }
+    }
+  ],
+  "definition_effect_sets": [
+    {
+      "id": 0,
+      "effects": []
+    },
+    {
+      "id": 1,
+      "effects": [
+        "class_body_execution"
+      ]
+    }
+  ],
+  "overload_groups": [],
+  "internal_candidates": [
+    {
+      "id": 0,
+      "definition": 0,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 1,
+      "definition": 1,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 2,
+      "definition": 2,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 3,
+      "definition": 3,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 4,
+      "definition": 4,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 5,
+      "definition": 5,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 6,
+      "definition": 6,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 7,
+      "definition": 7,
+      "rule": "unreferenced_function",
+      "disposition": "suppressed",
+      "reasons": [
+        "non_reportable_definition"
+      ],
+      "inbound_references": [
+        28
+      ],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 8,
+      "definition": 8,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 9,
+      "definition": 9,
+      "rule": "unreferenced_function",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "no_known_definition_effects"
+      }
+    },
+    {
+      "id": 10,
+      "definition": 10,
+      "rule": "unreferenced_class",
+      "disposition": "candidate",
+      "reasons": [
+        "no_same_module_references",
+        "cross_module_analysis_deferred"
+      ],
+      "inbound_references": [],
+      "removal_risk": {
+        "risk": "review",
+        "effects": 1
       }
     }
   ],

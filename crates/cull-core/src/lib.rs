@@ -7,8 +7,8 @@ pub mod source;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity};
 pub use ids::{
-    BindingId, BindingSetId, ContextId, DefId, FileId, FlowUncertaintySetId, LoopId, ModuleId,
-    ReferenceId, ScopeId, SymbolId,
+    BindingId, BindingSetId, ContextId, DefId, DefinitionEffectSetId, FileId, FlowUncertaintySetId,
+    InternalCandidateId, LoopId, ModuleId, OverloadGroupId, ReferenceId, ScopeId, SymbolId,
 };
 pub use ir::{DefinitionIr, DefinitionKey, DefinitionKind, ModuleIr};
 pub use output::{
@@ -16,12 +16,15 @@ pub use output::{
     DebugReferencesOutput, SourceRootOutput,
 };
 pub use semantic::{
-    BindingFact, BindingInput, BindingKind, BindingSetFact, BindingState, CompletionKind,
-    ContextFact, ContextFlowStatus, ContextFlowStatusFact, ContextKind, DefinitionInput,
-    FlowFailureReason, FlowResourceBudget, FlowUncertaintyKind, FlowUncertaintySetFact,
-    LocalReachability, LookupSemantics, OriginDomain, ReferenceBindingState, ReferenceFact,
-    ReferenceInput, ReferencePhase, ReferenceRole, ResidualLookup, Resolution, ScopeContextInput,
-    ScopeFact, ScopeKind, SemanticDefinition, SemanticGraph, SemanticGraphBuilder, SemanticModule,
-    SymbolFact, UnresolvedReason,
+    AnnotationEvaluation, AnnotationSemantics, BindingFact, BindingInput, BindingKind,
+    BindingSetFact, BindingState, CompletionKind, ContextFact, ContextFlowStatus,
+    ContextFlowStatusFact, ContextKind, DefinitionEffectKind, DefinitionEffectSetFact,
+    DefinitionInput, DefinitionRole, FlowFailureReason, FlowResourceBudget, FlowUncertaintyKind,
+    FlowUncertaintySetFact, InternalCandidateDisposition, InternalCandidateFact,
+    InternalCandidateInput, InternalCandidateReason, InternalCandidateRule, LocalReachability,
+    LookupSemantics, OriginDomain, OriginEvidence, OverloadGroupFact, ReferenceBindingState,
+    ReferenceFact, ReferenceInput, ReferencePhase, ReferenceRole, RemovalRisk, ResidualLookup,
+    Resolution, ScopeContextInput, ScopeFact, ScopeKind, SemanticDefinition, SemanticGraph,
+    SemanticGraphBuilder, SemanticModule, SymbolFact, UnresolvedReason,
 };
 pub use source::{DecodedSourceInfo, PythonVersion, TextRange};

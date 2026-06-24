@@ -1,15 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cull_core::{
-    BindingId, BindingInput, BindingKind, ContextId, ContextKind, DefinitionInput, DefinitionKind,
-    Diagnostic, LookupSemantics, ModuleId, OriginDomain, ReferenceBindingState, ReferenceInput,
+    AnnotationEvaluation, AnnotationSemantics, BindingId, BindingInput, BindingKind, ContextId,
+    ContextKind, DefinitionInput, DefinitionKind, Diagnostic, FlowFailureReason, LookupSemantics,
+    ModuleId, OriginDomain, OriginEvidence, PythonVersion, ReferenceBindingState, ReferenceInput,
     ReferencePhase, ReferenceRole, Resolution, ScopeContextInput, ScopeId, ScopeKind,
     SemanticGraphBuilder, SemanticModule, SymbolId, TextRange, UnresolvedReason,
 };
 use ruff_python_ast::{
     Expr, ExprContext, FStringPart, Identifier, InterpolatedStringElement, ModModule, Parameter,
-    Pattern, Stmt, StmtClassDef, StmtFunctionDef,
+    Pattern, Stmt, StmtClassDef, StmtFunctionDef, TypeParam, UnaryOp,
 };
+use ruff_python_parser::parse_string_annotation;
+use ruff_text_size::Ranged;
 
 use crate::{
     frontend::ParseInput,
@@ -21,8 +24,11 @@ pub(crate) fn collect_module_semantics(
     diagnostics: &mut Vec<Diagnostic>,
     input: ParseInput<'_>,
     module: &ModModule,
+    origin_domain: OriginDomain,
+    origin_evidence: OriginEvidence,
 ) {
     let module_range = to_range(module.range);
+    let future_annotations = module_has_future_annotations(&module.body);
     let (scope, context) = builder.add_scope_with_context(ScopeContextInput {
         module: input.module_id,
         scope_kind: ScopeKind::Module,
@@ -39,7 +45,9 @@ pub(crate) fn collect_module_semantics(
         file: input.file_id,
         name: input.module_name.to_owned(),
         path: input.display_path.to_owned(),
-        future_annotations: module_has_future_annotations(&module.body),
+        future_annotations,
+        origin_domain,
+        origin_evidence,
         scope,
         context,
     });
@@ -51,6 +59,12 @@ pub(crate) fn collect_module_semantics(
         module: input.module_id,
         display_path: input.display_path,
         source: &input.source.text,
+        target_python: input.target_python,
+        future_annotations,
+        type_checking_symbols: BTreeSet::new(),
+        typing_module_symbols: BTreeSet::new(),
+        literal_symbols: BTreeSet::new(),
+        overload_symbols: BTreeSet::new(),
     };
     collector.predeclare(scope, &declarations);
     collector.collect_body(
@@ -61,10 +75,14 @@ pub(crate) fn collect_module_semantics(
             kind: ScopeKind::Module,
             lexical_parent_for_nested_scopes: scope,
             qualified_name: input.module_name.to_owned(),
-            declarations,
+            declarations: declarations.clone(),
             lexical_frames: Vec::new(),
             module_scope: scope,
             class_mangle: None,
+            origin_domain,
+            annotation_class_scope: None,
+            annotation_type_param_scope: None,
+            forced_phase: None,
         },
     );
 }
@@ -80,12 +98,36 @@ struct ActiveScope {
     lexical_frames: Vec<LexicalFrame>,
     module_scope: ScopeId,
     class_mangle: Option<String>,
+    origin_domain: OriginDomain,
+    annotation_class_scope: Option<AnnotationClassScope>,
+    annotation_type_param_scope: Option<AnnotationClassScope>,
+    forced_phase: Option<ReferencePhase>,
 }
 
 #[derive(Clone, Debug)]
 struct LexicalFrame {
     scope: ScopeId,
     kind: ScopeKind,
+    declarations: BlockDeclarations,
+}
+
+impl ActiveScope {
+    fn as_type_only(&self) -> Self {
+        let mut active = self.clone();
+        active.forced_phase = Some(ReferencePhase::TypeOnly);
+        active
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypeCheckingCondition {
+    Positive,
+    Negative,
+}
+
+#[derive(Clone, Debug)]
+struct AnnotationClassScope {
+    scope: ScopeId,
     declarations: BlockDeclarations,
 }
 
@@ -143,6 +185,12 @@ struct ModuleCollector<'a, 'b> {
     module: ModuleId,
     display_path: &'b str,
     source: &'b str,
+    target_python: PythonVersion,
+    future_annotations: bool,
+    type_checking_symbols: BTreeSet<SymbolId>,
+    typing_module_symbols: BTreeSet<SymbolId>,
+    literal_symbols: BTreeSet<SymbolId>,
+    overload_symbols: BTreeSet<SymbolId>,
 }
 
 impl ModuleCollector<'_, '_> {
@@ -174,6 +222,17 @@ impl ModuleCollector<'_, '_> {
                 }
             }
             Stmt::AnnAssign(assign) => {
+                let semantics = self.annotation_semantics(
+                    &active,
+                    AnnotationSite::AnnotatedAssignment {
+                        function_local: matches!(
+                            active.kind,
+                            ScopeKind::Function | ScopeKind::Lambda | ScopeKind::Comprehension
+                        ),
+                    },
+                    to_range(assign.annotation.range()),
+                );
+                self.collect_annotation_expr(&assign.annotation, &active, semantics, true);
                 if let Some(value) = &assign.value {
                     self.collect_expr(value, &active, ReferenceRole::Value);
                 }
@@ -197,12 +256,30 @@ impl ModuleCollector<'_, '_> {
             }
             Stmt::If(if_stmt) => {
                 self.collect_expr(&if_stmt.test, &active, ReferenceRole::Value);
-                self.collect_body(&if_stmt.body, active.clone());
+                let type_checking = self.type_checking_condition(&if_stmt.test, &active);
+                let body_active = match type_checking {
+                    Some(TypeCheckingCondition::Positive) => active.as_type_only(),
+                    _ => active.clone(),
+                };
+                self.collect_body(&if_stmt.body, body_active);
                 for clause in &if_stmt.elif_else_clauses {
                     if let Some(test) = &clause.test {
                         self.collect_expr(test, &active, ReferenceRole::Value);
                     }
-                    self.collect_body(&clause.body, active.clone());
+                    let clause_type_checking = clause
+                        .test
+                        .as_ref()
+                        .and_then(|test| self.type_checking_condition(test, &active));
+                    let clause_active = if clause_type_checking
+                        == Some(TypeCheckingCondition::Positive)
+                        || (clause.test.is_none()
+                            && type_checking == Some(TypeCheckingCondition::Negative))
+                    {
+                        active.as_type_only()
+                    } else {
+                        active.clone()
+                    };
+                    self.collect_body(&clause.body, clause_active);
                 }
             }
             Stmt::With(with_stmt) => {
@@ -273,13 +350,18 @@ impl ModuleCollector<'_, '_> {
                                 to_range(alias.name.range),
                             )
                         });
-                    self.bind_name(
+                    let binding = self.bind_name(
                         &active,
                         BindingKind::Import,
                         bound_name,
                         to_range(alias.range),
                         name_range,
                     );
+                    if matches!(alias.name.id.as_str(), "typing" | "typing_extensions") {
+                        if let Some(symbol) = self.binding_symbol(binding) {
+                            self.typing_module_symbols.insert(symbol);
+                        }
+                    }
                 }
             }
             Stmt::ImportFrom(import) => {
@@ -302,16 +384,47 @@ impl ModuleCollector<'_, '_> {
                                 to_range(alias.name.range),
                             )
                         });
-                    self.bind_name(
+                    let binding = self.bind_name(
                         &active,
                         BindingKind::ImportFrom,
-                        bound_name,
+                        bound_name.clone(),
                         to_range(alias.range),
                         name_range,
                     );
+                    if import.module.as_ref().is_some_and(|module| {
+                        matches!(module.id.as_str(), "typing" | "typing_extensions")
+                    }) {
+                        match alias.name.id.as_str() {
+                            "TYPE_CHECKING" => {
+                                if let Some(symbol) = self.binding_symbol(binding) {
+                                    self.type_checking_symbols.insert(symbol);
+                                }
+                            }
+                            "overload" => {
+                                if let Some(symbol) = self.binding_symbol(binding) {
+                                    self.overload_symbols.insert(symbol);
+                                }
+                            }
+                            "Literal" => {
+                                if let Some(symbol) = self.binding_symbol(binding) {
+                                    self.literal_symbols.insert(symbol);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             Stmt::TypeAlias(alias) => {
+                let mut annotation =
+                    self.annotation_active(&active, to_range(alias.range), "type-alias");
+                self.collect_type_params(alias.type_params.as_deref(), &mut annotation);
+                let semantics = self.annotation_semantics(
+                    &annotation,
+                    AnnotationSite::TypeAliasValue,
+                    to_range(alias.value.range()),
+                );
+                self.collect_annotation_expr(&alias.value, &annotation, semantics, true);
                 self.collect_target(&alias.name, &active, BindingKind::TypeAlias);
             }
             Stmt::Expr(expr) => {
@@ -330,7 +443,25 @@ impl ModuleCollector<'_, '_> {
         for decorator in &function.decorator_list {
             self.collect_expr(&decorator.expression, &active, ReferenceRole::Decorator);
         }
+        let is_overload = function
+            .decorator_list
+            .iter()
+            .any(|decorator| self.is_overload_decorator(&decorator.expression, &active));
         self.collect_parameter_defaults(&function.parameters, &active);
+        if function_has_annotation_work(function) {
+            let mut annotation =
+                self.annotation_active(&active, to_range(function.range), "function");
+            self.collect_type_params(function.type_params.as_deref(), &mut annotation);
+            self.collect_parameter_annotations(&function.parameters, &annotation);
+            if let Some(returns) = &function.returns {
+                let semantics = self.annotation_semantics(
+                    &annotation,
+                    AnnotationSite::Ordinary,
+                    to_range(returns.range()),
+                );
+                self.collect_annotation_expr(returns, &annotation, semantics, true);
+            }
+        }
 
         let source_name = function.name.id.to_string();
         let semantic_name = self.semantic_name(&active, &source_name);
@@ -364,7 +495,7 @@ impl ModuleCollector<'_, '_> {
         });
         self.predeclare(scope, &declarations);
 
-        self.builder.add_definition(DefinitionInput {
+        let definition = self.builder.add_definition(DefinitionInput {
             module: self.module,
             binding,
             scope,
@@ -374,9 +505,17 @@ impl ModuleCollector<'_, '_> {
             qualified_name: qualified_name.clone(),
             range,
             name_range,
-            reportable: active.kind == ScopeKind::Module,
+            reportable: is_reportable_definition_scope(&active),
             is_async: function.is_async,
+            origin_domain: active.origin_domain,
         });
+        if is_overload {
+            self.builder.set_definition_role(
+                definition,
+                cull_core::DefinitionRole::OverloadDeclaration,
+                None,
+            );
+        }
 
         let mut frames = active.lexical_frames.clone();
         frames.push(LexicalFrame {
@@ -390,10 +529,14 @@ impl ModuleCollector<'_, '_> {
             kind: ScopeKind::Function,
             lexical_parent_for_nested_scopes: scope,
             qualified_name,
-            declarations,
+            declarations: declarations.clone(),
             lexical_frames: frames,
             module_scope: active.module_scope,
             class_mangle: active.class_mangle,
+            origin_domain: active.origin_domain,
+            annotation_class_scope: active.annotation_class_scope,
+            annotation_type_param_scope: active.annotation_type_param_scope,
+            forced_phase: active.forced_phase,
         };
         self.collect_parameters(&function.parameters, &child);
         self.collect_body(&function.body, child);
@@ -403,12 +546,38 @@ impl ModuleCollector<'_, '_> {
         for decorator in &class.decorator_list {
             self.collect_expr(&decorator.expression, &active, ReferenceRole::Decorator);
         }
+        let mut annotation = class
+            .type_params
+            .as_ref()
+            .map(|_| self.annotation_active(&active, to_range(class.range), "class"));
+        if let Some(annotation) = &mut annotation {
+            self.collect_type_params(class.type_params.as_deref(), annotation);
+        }
         if let Some(arguments) = &class.arguments {
             for base in &arguments.args {
-                self.collect_expr(base, &active, ReferenceRole::BaseClass);
+                let target = if let Some(annotation) = &annotation {
+                    annotation
+                } else {
+                    &active
+                };
+                self.collect_expr(base, target, ReferenceRole::BaseClass);
             }
             for keyword in &arguments.keywords {
-                self.collect_expr(&keyword.value, &active, ReferenceRole::ClassKeyword);
+                let target = if let Some(annotation) = &annotation {
+                    annotation
+                } else {
+                    &active
+                };
+                let role = if keyword
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.id.as_str() == "metaclass")
+                {
+                    ReferenceRole::Metaclass
+                } else {
+                    ReferenceRole::ClassKeyword
+                };
+                self.collect_expr(&keyword.value, target, role);
             }
         }
 
@@ -455,8 +624,9 @@ impl ModuleCollector<'_, '_> {
             qualified_name: qualified_name.clone(),
             range,
             name_range,
-            reportable: active.kind == ScopeKind::Module,
+            reportable: is_reportable_definition_scope(&active),
             is_async: false,
+            origin_domain: active.origin_domain,
         });
 
         let child = ActiveScope {
@@ -465,12 +635,200 @@ impl ModuleCollector<'_, '_> {
             kind: ScopeKind::Class,
             lexical_parent_for_nested_scopes: active.lexical_parent_for_nested_scopes,
             qualified_name,
-            declarations,
+            declarations: declarations.clone(),
             lexical_frames: active.lexical_frames,
             module_scope: active.module_scope,
             class_mangle,
+            origin_domain: active.origin_domain,
+            annotation_class_scope: Some(AnnotationClassScope {
+                scope,
+                declarations: declarations.clone(),
+            }),
+            annotation_type_param_scope: annotation.as_ref().map(|annotation| {
+                AnnotationClassScope {
+                    scope: annotation.scope,
+                    declarations: annotation.declarations.clone(),
+                }
+            }),
+            forced_phase: active.forced_phase,
         };
         self.collect_body(&class.body, child);
+    }
+
+    fn annotation_active(
+        &mut self,
+        active: &ActiveScope,
+        range: TextRange,
+        label: &str,
+    ) -> ActiveScope {
+        let name = format!(
+            "{}::<annotation@{}:{label}>",
+            active.qualified_name, range.start
+        );
+        let (scope, context) = self.builder.add_scope_with_context(ScopeContextInput {
+            module: self.module,
+            scope_kind: ScopeKind::Annotation,
+            context_kind: ContextKind::Annotation,
+            parent_scope: Some(active.scope),
+            parent_context: Some(active.context),
+            owner_definition: None,
+            name,
+            range,
+        });
+        let declarations = BlockDeclarations::default();
+        ActiveScope {
+            scope,
+            context,
+            kind: ScopeKind::Annotation,
+            lexical_parent_for_nested_scopes: scope,
+            qualified_name: active.qualified_name.clone(),
+            declarations,
+            lexical_frames: active.lexical_frames.clone(),
+            module_scope: active.module_scope,
+            class_mangle: active.class_mangle.clone(),
+            origin_domain: active.origin_domain,
+            annotation_class_scope: if active.kind == ScopeKind::Class {
+                Some(AnnotationClassScope {
+                    scope: active.scope,
+                    declarations: active.declarations.clone(),
+                })
+            } else {
+                active.annotation_class_scope.clone()
+            },
+            annotation_type_param_scope: active.annotation_type_param_scope.clone(),
+            forced_phase: active.forced_phase,
+        }
+    }
+
+    fn annotation_semantics(
+        &self,
+        active: &ActiveScope,
+        site: AnnotationSite,
+        _scope_range: TextRange,
+    ) -> AnnotationSemantics {
+        let evaluation = match site {
+            AnnotationSite::Ordinary => {
+                if self.future_annotations {
+                    AnnotationEvaluation::Stringified
+                } else if self.target_python >= PythonVersion::PY314 {
+                    AnnotationEvaluation::Deferred
+                } else {
+                    AnnotationEvaluation::Eager
+                }
+            }
+            AnnotationSite::AnnotatedAssignment { function_local } => {
+                if function_local {
+                    AnnotationEvaluation::NeverEvaluated
+                } else if self.future_annotations {
+                    AnnotationEvaluation::Stringified
+                } else if self.target_python >= PythonVersion::PY314 {
+                    AnnotationEvaluation::Deferred
+                } else {
+                    AnnotationEvaluation::Eager
+                }
+            }
+            AnnotationSite::TypeAliasValue | AnnotationSite::TypeParameterBound => {
+                if self.target_python >= PythonVersion::PY312 {
+                    AnnotationEvaluation::Deferred
+                } else {
+                    AnnotationEvaluation::Eager
+                }
+            }
+            AnnotationSite::TypeParameterDefault => {
+                if self.target_python >= PythonVersion::PY313 {
+                    AnnotationEvaluation::Deferred
+                } else {
+                    AnnotationEvaluation::Eager
+                }
+            }
+        };
+        let phase = match evaluation {
+            AnnotationEvaluation::Eager => ReferencePhase::DefinitionTime,
+            AnnotationEvaluation::Stringified | AnnotationEvaluation::NeverEvaluated => {
+                ReferencePhase::TypeOnly
+            }
+            AnnotationEvaluation::Deferred => ReferencePhase::LazyAnnotation,
+        };
+        AnnotationSemantics {
+            evaluation,
+            phase,
+            scope: active.scope,
+        }
+    }
+
+    fn collect_type_params(
+        &mut self,
+        type_params: Option<&ruff_python_ast::TypeParams>,
+        active: &mut ActiveScope,
+    ) {
+        let Some(type_params) = type_params else {
+            return;
+        };
+        for type_param in &type_params.type_params {
+            let name = type_param.name();
+            active.declarations.record_binding(
+                self.semantic_name(active, name.id.as_str()),
+                to_range(name.range),
+            );
+            self.bind_identifier(active, BindingKind::TypeParameter, name);
+            match type_param {
+                TypeParam::TypeVar(type_var) => {
+                    if let Some(bound) = &type_var.bound {
+                        let semantics = self.annotation_semantics(
+                            active,
+                            AnnotationSite::TypeParameterBound,
+                            to_range(bound.range()),
+                        );
+                        self.collect_annotation_expr(bound, active, semantics, true);
+                    }
+                    if let Some(default) = &type_var.default {
+                        let semantics = self.annotation_semantics(
+                            active,
+                            AnnotationSite::TypeParameterDefault,
+                            to_range(default.range()),
+                        );
+                        self.collect_annotation_expr(default, active, semantics, true);
+                    }
+                }
+                TypeParam::TypeVarTuple(type_var_tuple) => {
+                    if let Some(default) = &type_var_tuple.default {
+                        let semantics = self.annotation_semantics(
+                            active,
+                            AnnotationSite::TypeParameterDefault,
+                            to_range(default.range()),
+                        );
+                        self.collect_annotation_expr(default, active, semantics, true);
+                    }
+                }
+                TypeParam::ParamSpec(param_spec) => {
+                    if let Some(default) = &param_spec.default {
+                        let semantics = self.annotation_semantics(
+                            active,
+                            AnnotationSite::TypeParameterDefault,
+                            to_range(default.range()),
+                        );
+                        self.collect_annotation_expr(default, active, semantics, true);
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_parameter_annotations(
+        &mut self,
+        parameters: &ruff_python_ast::Parameters,
+        active: &ActiveScope,
+    ) {
+        for parameter in parameters.iter_source_order() {
+            if let Some(annotation) = parameter.annotation() {
+                let semantics = self.annotation_semantics(
+                    active,
+                    AnnotationSite::Ordinary,
+                    to_range(annotation.range()),
+                );
+                self.collect_annotation_expr(annotation, active, semantics, true);
+            }
+        }
     }
 
     fn collect_parameters(
@@ -673,6 +1031,339 @@ impl ModuleCollector<'_, '_> {
         }
     }
 
+    fn collect_annotation_expr(
+        &mut self,
+        expression: &Expr,
+        active: &ActiveScope,
+        semantics: AnnotationSemantics,
+        parse_string_literals: bool,
+    ) {
+        match expression {
+            Expr::Name(name) if matches!(name.ctx, ExprContext::Load) => {
+                self.add_name_reference_with_phase(
+                    active,
+                    name.id.as_str(),
+                    to_range(name.range),
+                    ReferenceRole::Annotation,
+                    semantics.phase,
+                    Some(semantics),
+                );
+            }
+            Expr::Name(_) => {}
+            Expr::Attribute(expr) => {
+                self.collect_annotation_expr(&expr.value, active, semantics, parse_string_literals)
+            }
+            Expr::Subscript(expr) => {
+                let value_is_literal = self.is_literal_annotation(&expr.value, active);
+                self.collect_annotation_expr(&expr.value, active, semantics, parse_string_literals);
+                self.collect_annotation_expr(
+                    &expr.slice,
+                    active,
+                    semantics,
+                    parse_string_literals && !value_is_literal,
+                );
+            }
+            Expr::StringLiteral(expr) if parse_string_literals => {
+                self.collect_string_annotation(expr, active, semantics);
+            }
+            Expr::StringLiteral(_) => {}
+            Expr::BoolOp(expr) => {
+                for value in &expr.values {
+                    self.collect_annotation_expr(value, active, semantics, parse_string_literals);
+                }
+            }
+            Expr::BinOp(expr) => {
+                self.collect_annotation_expr(&expr.left, active, semantics, parse_string_literals);
+                self.collect_annotation_expr(&expr.right, active, semantics, parse_string_literals);
+            }
+            Expr::UnaryOp(expr) => self.collect_annotation_expr(
+                &expr.operand,
+                active,
+                semantics,
+                parse_string_literals,
+            ),
+            Expr::If(expr) => {
+                self.collect_annotation_expr(&expr.test, active, semantics, parse_string_literals);
+                self.collect_annotation_expr(&expr.body, active, semantics, parse_string_literals);
+                self.collect_annotation_expr(
+                    &expr.orelse,
+                    active,
+                    semantics,
+                    parse_string_literals,
+                );
+            }
+            Expr::Tuple(expr) => {
+                for element in &expr.elts {
+                    self.collect_annotation_expr(element, active, semantics, parse_string_literals);
+                }
+            }
+            Expr::List(expr) => {
+                for element in &expr.elts {
+                    self.collect_annotation_expr(element, active, semantics, parse_string_literals);
+                }
+            }
+            Expr::Set(expr) => {
+                for element in &expr.elts {
+                    self.collect_annotation_expr(element, active, semantics, parse_string_literals);
+                }
+            }
+            Expr::Dict(expr) => {
+                for item in &expr.items {
+                    if let Some(key) = &item.key {
+                        self.collect_annotation_expr(key, active, semantics, parse_string_literals);
+                    }
+                    self.collect_annotation_expr(
+                        &item.value,
+                        active,
+                        semantics,
+                        parse_string_literals,
+                    );
+                }
+            }
+            Expr::Slice(expr) => {
+                if let Some(lower) = &expr.lower {
+                    self.collect_annotation_expr(lower, active, semantics, parse_string_literals);
+                }
+                if let Some(upper) = &expr.upper {
+                    self.collect_annotation_expr(upper, active, semantics, parse_string_literals);
+                }
+                if let Some(step) = &expr.step {
+                    self.collect_annotation_expr(step, active, semantics, parse_string_literals);
+                }
+            }
+            Expr::Call(expr) => {
+                self.collect_annotation_expr(&expr.func, active, semantics, parse_string_literals);
+                for arg in &expr.arguments.args {
+                    self.collect_annotation_expr(arg, active, semantics, parse_string_literals);
+                }
+                for keyword in &expr.arguments.keywords {
+                    self.collect_annotation_expr(
+                        &keyword.value,
+                        active,
+                        semantics,
+                        parse_string_literals,
+                    );
+                }
+            }
+            Expr::Starred(expr) => {
+                self.collect_annotation_expr(&expr.value, active, semantics, parse_string_literals)
+            }
+            Expr::FString(expr) => self.collect_interpolated_string_expr(
+                expr.value.as_slice(),
+                active,
+                ReferenceRole::Annotation,
+            ),
+            Expr::TString(expr) => {
+                for string in expr.value.as_slice() {
+                    self.collect_interpolated_elements(
+                        &string.elements,
+                        active,
+                        ReferenceRole::Annotation,
+                    );
+                }
+            }
+            Expr::Lambda(_)
+            | Expr::Named(_)
+            | Expr::ListComp(_)
+            | Expr::SetComp(_)
+            | Expr::DictComp(_)
+            | Expr::Generator(_)
+            | Expr::Await(_)
+            | Expr::Yield(_)
+            | Expr::YieldFrom(_)
+            | Expr::Compare(_)
+            | Expr::BytesLiteral(_)
+            | Expr::NumberLiteral(_)
+            | Expr::BooleanLiteral(_)
+            | Expr::NoneLiteral(_)
+            | Expr::EllipsisLiteral(_)
+            | Expr::IpyEscapeCommand(_) => {}
+        }
+    }
+
+    fn collect_string_annotation(
+        &mut self,
+        expression: &ruff_python_ast::ExprStringLiteral,
+        active: &ActiveScope,
+        semantics: AnnotationSemantics,
+    ) {
+        let semantics = AnnotationSemantics {
+            evaluation: AnnotationEvaluation::Stringified,
+            phase: ReferencePhase::TypeOnly,
+            scope: semantics.scope,
+        };
+        for string in &expression.value {
+            match parse_string_annotation(self.source, string) {
+                Ok(parsed) => {
+                    self.collect_annotation_expr_with_span(
+                        &parsed.into_syntax().body,
+                        active,
+                        semantics,
+                        to_range(string.range),
+                    );
+                }
+                Err(error) => {
+                    self.add_unsupported_annotation_reference(
+                        active,
+                        to_range(string.range),
+                        semantics,
+                    );
+                    self.diagnostics.push(
+                        Diagnostic::warning(
+                            "CULL_P1106",
+                            format!("unsupported string annotation: {error}"),
+                        )
+                        .with_path(self.display_path.to_owned())
+                        .with_range(to_range(string.range)),
+                    );
+                }
+            }
+        }
+    }
+
+    fn add_unsupported_annotation_reference(
+        &mut self,
+        active: &ActiveScope,
+        span: TextRange,
+        semantics: AnnotationSemantics,
+    ) {
+        let source_spelling = self
+            .source
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or("<unsupported annotation>")
+            .to_owned();
+        self.builder.add_reference(ReferenceInput {
+            module: self.module,
+            source_scope: active.scope,
+            source_context: active.context,
+            source_spelling: source_spelling.clone(),
+            semantic_name: source_spelling,
+            lexical_target: Resolution::Unresolved(UnresolvedReason::UnsupportedAnnotation),
+            lookup: LookupSemantics::Direct,
+            binding_state: ReferenceBindingState::NotAnalyzed(
+                FlowFailureReason::UnsupportedAnnotation,
+            ),
+            phase: semantics.phase,
+            role: ReferenceRole::Annotation,
+            origin_domain: active.origin_domain,
+            annotation_semantics: Some(semantics),
+            span,
+        });
+    }
+
+    fn collect_annotation_expr_with_span(
+        &mut self,
+        expression: &Expr,
+        active: &ActiveScope,
+        semantics: AnnotationSemantics,
+        span: TextRange,
+    ) {
+        match expression {
+            Expr::Name(name) if matches!(name.ctx, ExprContext::Load) => {
+                self.add_name_reference_with_phase(
+                    active,
+                    name.id.as_str(),
+                    span,
+                    ReferenceRole::Annotation,
+                    semantics.phase,
+                    Some(semantics),
+                );
+            }
+            Expr::Name(_) | Expr::StringLiteral(_) => {}
+            Expr::Attribute(expr) => {
+                self.collect_annotation_expr_with_span(&expr.value, active, semantics, span)
+            }
+            Expr::Subscript(expr) => {
+                let value_is_literal = self.is_literal_annotation(&expr.value, active);
+                self.collect_annotation_expr_with_span(&expr.value, active, semantics, span);
+                if !value_is_literal {
+                    self.collect_annotation_expr_with_span(&expr.slice, active, semantics, span);
+                }
+            }
+            Expr::BoolOp(expr) => {
+                for value in &expr.values {
+                    self.collect_annotation_expr_with_span(value, active, semantics, span);
+                }
+            }
+            Expr::BinOp(expr) => {
+                self.collect_annotation_expr_with_span(&expr.left, active, semantics, span);
+                self.collect_annotation_expr_with_span(&expr.right, active, semantics, span);
+            }
+            Expr::UnaryOp(expr) => {
+                self.collect_annotation_expr_with_span(&expr.operand, active, semantics, span)
+            }
+            Expr::If(expr) => {
+                self.collect_annotation_expr_with_span(&expr.test, active, semantics, span);
+                self.collect_annotation_expr_with_span(&expr.body, active, semantics, span);
+                self.collect_annotation_expr_with_span(&expr.orelse, active, semantics, span);
+            }
+            Expr::Tuple(expr) => {
+                for element in &expr.elts {
+                    self.collect_annotation_expr_with_span(element, active, semantics, span);
+                }
+            }
+            Expr::List(expr) => {
+                for element in &expr.elts {
+                    self.collect_annotation_expr_with_span(element, active, semantics, span);
+                }
+            }
+            Expr::Set(expr) => {
+                for element in &expr.elts {
+                    self.collect_annotation_expr_with_span(element, active, semantics, span);
+                }
+            }
+            Expr::Dict(expr) => {
+                for item in &expr.items {
+                    if let Some(key) = &item.key {
+                        self.collect_annotation_expr_with_span(key, active, semantics, span);
+                    }
+                    self.collect_annotation_expr_with_span(&item.value, active, semantics, span);
+                }
+            }
+            Expr::Slice(expr) => {
+                if let Some(lower) = &expr.lower {
+                    self.collect_annotation_expr_with_span(lower, active, semantics, span);
+                }
+                if let Some(upper) = &expr.upper {
+                    self.collect_annotation_expr_with_span(upper, active, semantics, span);
+                }
+                if let Some(step) = &expr.step {
+                    self.collect_annotation_expr_with_span(step, active, semantics, span);
+                }
+            }
+            Expr::Call(expr) => {
+                self.collect_annotation_expr_with_span(&expr.func, active, semantics, span);
+                for arg in &expr.arguments.args {
+                    self.collect_annotation_expr_with_span(arg, active, semantics, span);
+                }
+                for keyword in &expr.arguments.keywords {
+                    self.collect_annotation_expr_with_span(&keyword.value, active, semantics, span);
+                }
+            }
+            Expr::Starred(expr) => {
+                self.collect_annotation_expr_with_span(&expr.value, active, semantics, span)
+            }
+            Expr::Lambda(_)
+            | Expr::Named(_)
+            | Expr::ListComp(_)
+            | Expr::SetComp(_)
+            | Expr::DictComp(_)
+            | Expr::Generator(_)
+            | Expr::Await(_)
+            | Expr::Yield(_)
+            | Expr::YieldFrom(_)
+            | Expr::Compare(_)
+            | Expr::FString(_)
+            | Expr::TString(_)
+            | Expr::BytesLiteral(_)
+            | Expr::NumberLiteral(_)
+            | Expr::BooleanLiteral(_)
+            | Expr::NoneLiteral(_)
+            | Expr::EllipsisLiteral(_)
+            | Expr::IpyEscapeCommand(_) => {}
+        }
+    }
+
     fn collect_interpolated_string_expr(
         &mut self,
         parts: &[FStringPart],
@@ -741,6 +1432,10 @@ impl ModuleCollector<'_, '_> {
             lexical_frames: frames,
             module_scope: active.module_scope,
             class_mangle: active.class_mangle.clone(),
+            origin_domain: active.origin_domain,
+            annotation_class_scope: active.annotation_class_scope.clone(),
+            annotation_type_param_scope: active.annotation_type_param_scope.clone(),
+            forced_phase: active.forced_phase,
         };
         if let Some(parameters) = &lambda.parameters {
             self.collect_parameters(parameters, &child);
@@ -793,6 +1488,10 @@ impl ModuleCollector<'_, '_> {
             lexical_frames: frames,
             module_scope: active.module_scope,
             class_mangle: active.class_mangle.clone(),
+            origin_domain: active.origin_domain,
+            annotation_class_scope: active.annotation_class_scope.clone(),
+            annotation_type_param_scope: active.annotation_type_param_scope.clone(),
+            forced_phase: active.forced_phase,
         };
 
         self.collect_target(&first.target, &child, BindingKind::ForTarget);
@@ -918,6 +1617,25 @@ impl ModuleCollector<'_, '_> {
         span: TextRange,
         role: ReferenceRole,
     ) {
+        self.add_name_reference_with_phase(
+            active,
+            source_name,
+            span,
+            role,
+            reference_phase(active, role),
+            None,
+        );
+    }
+
+    fn add_name_reference_with_phase(
+        &mut self,
+        active: &ActiveScope,
+        source_name: &str,
+        span: TextRange,
+        role: ReferenceRole,
+        phase: ReferencePhase,
+        annotation_semantics: Option<AnnotationSemantics>,
+    ) {
         let semantic_name = self.semantic_name(active, source_name);
         let (lexical_target, lookup) = self.resolve_name(active, &semantic_name);
         self.builder.add_reference(ReferenceInput {
@@ -929,9 +1647,10 @@ impl ModuleCollector<'_, '_> {
             lexical_target,
             lookup,
             binding_state: ReferenceBindingState::NotApplicable,
-            phase: reference_phase(active, role),
+            phase,
             role,
-            origin_domain: OriginDomain::Production,
+            origin_domain: active.origin_domain,
+            annotation_semantics,
             span,
         });
     }
@@ -976,6 +1695,14 @@ impl ModuleCollector<'_, '_> {
                 )
             }
             ScopeKind::Class => {
+                if let Some(type_param_scope) = &active.annotation_type_param_scope {
+                    if type_param_scope.declarations.locals.contains(name) {
+                        let symbol = self
+                            .builder
+                            .symbol(self.module, type_param_scope.scope, name);
+                        return (Resolution::Resolved(symbol), LookupSemantics::Direct);
+                    }
+                }
                 if !active.declarations.locals.contains(name) {
                     if let Some(symbol) = self.find_enclosing_function_symbol(active, name) {
                         return (Resolution::Resolved(symbol), LookupSemantics::Direct);
@@ -992,10 +1719,29 @@ impl ModuleCollector<'_, '_> {
                     },
                 )
             }
-            ScopeKind::Function | ScopeKind::Lambda | ScopeKind::Comprehension => {
+            ScopeKind::Function
+            | ScopeKind::Lambda
+            | ScopeKind::Comprehension
+            | ScopeKind::Annotation => {
                 if active.declarations.locals.contains(name) {
                     let symbol = self.builder.symbol(self.module, active.scope, name);
                     return (Resolution::Resolved(symbol), LookupSemantics::Direct);
+                }
+                if active.kind == ScopeKind::Annotation {
+                    if let Some(type_param_scope) = &active.annotation_type_param_scope {
+                        if type_param_scope.declarations.locals.contains(name) {
+                            let symbol =
+                                self.builder
+                                    .symbol(self.module, type_param_scope.scope, name);
+                            return (Resolution::Resolved(symbol), LookupSemantics::Direct);
+                        }
+                    }
+                    if let Some(class_scope) = &active.annotation_class_scope {
+                        if class_scope.declarations.locals.contains(name) {
+                            let symbol = self.builder.symbol(self.module, class_scope.scope, name);
+                            return (Resolution::Resolved(symbol), LookupSemantics::Direct);
+                        }
+                    }
                 }
                 if let Some(symbol) = self.find_enclosing_function_symbol(active, name) {
                     return (Resolution::Resolved(symbol), LookupSemantics::Direct);
@@ -1161,6 +1907,12 @@ impl ModuleCollector<'_, '_> {
     ) -> BindingId {
         let scope = self.binding_scope(active, &name);
         let symbol = self.builder.symbol(self.module, scope, &name);
+        if !matches!(kind, BindingKind::Import | BindingKind::ImportFrom) {
+            self.type_checking_symbols.remove(&symbol);
+            self.typing_module_symbols.remove(&symbol);
+            self.literal_symbols.remove(&symbol);
+            self.overload_symbols.remove(&symbol);
+        }
         self.builder.add_binding(BindingInput {
             module: self.module,
             scope,
@@ -1170,6 +1922,14 @@ impl ModuleCollector<'_, '_> {
             range,
             name_range,
         })
+    }
+
+    fn binding_symbol(&self, binding: BindingId) -> Option<SymbolId> {
+        self.builder
+            .graph()
+            .bindings
+            .get(binding.as_u32() as usize)
+            .map(|binding| binding.symbol)
     }
 
     fn semantic_name(&self, active: &ActiveScope, name: &str) -> String {
@@ -1224,6 +1984,97 @@ impl ModuleCollector<'_, '_> {
 
         None
     }
+
+    fn type_checking_condition(
+        &mut self,
+        expression: &Expr,
+        active: &ActiveScope,
+    ) -> Option<TypeCheckingCondition> {
+        match expression {
+            Expr::Name(name)
+                if self
+                    .resolved_symbol(active, name.id.as_str())
+                    .is_some_and(|symbol| self.type_checking_symbols.contains(&symbol)) =>
+            {
+                Some(TypeCheckingCondition::Positive)
+            }
+            Expr::Attribute(attribute)
+                if attribute.attr.id.as_str() == "TYPE_CHECKING"
+                    && matches!(
+                        attribute.value.as_ref(),
+                        Expr::Name(name)
+                            if self
+                                .resolved_symbol(active, name.id.as_str())
+                                .is_some_and(|symbol| self.typing_module_symbols.contains(&symbol))
+                    ) =>
+            {
+                Some(TypeCheckingCondition::Positive)
+            }
+            Expr::UnaryOp(unary) if unary.op == UnaryOp::Not => self
+                .type_checking_condition(&unary.operand, active)
+                .map(|condition| match condition {
+                    TypeCheckingCondition::Positive => TypeCheckingCondition::Negative,
+                    TypeCheckingCondition::Negative => TypeCheckingCondition::Positive,
+                }),
+            _ => None,
+        }
+    }
+
+    fn is_overload_decorator(&mut self, expression: &Expr, active: &ActiveScope) -> bool {
+        match expression {
+            Expr::Name(name) => self
+                .resolved_symbol(active, name.id.as_str())
+                .is_some_and(|symbol| self.overload_symbols.contains(&symbol)),
+            Expr::Attribute(attribute)
+                if attribute.attr.id.as_str() == "overload"
+                    && matches!(
+                        attribute.value.as_ref(),
+                        Expr::Name(name)
+                            if self
+                                .resolved_symbol(active, name.id.as_str())
+                                .is_some_and(|symbol| self.typing_module_symbols.contains(&symbol))
+                    ) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn is_literal_annotation(&mut self, expression: &Expr, active: &ActiveScope) -> bool {
+        match expression {
+            Expr::Name(name) => self
+                .resolved_symbol(active, name.id.as_str())
+                .is_some_and(|symbol| self.literal_symbols.contains(&symbol)),
+            Expr::Attribute(attribute) if attribute.attr.id.as_str() == "Literal" => {
+                matches!(
+                    attribute.value.as_ref(),
+                    Expr::Name(name)
+                        if self
+                            .resolved_symbol(active, name.id.as_str())
+                            .is_some_and(|symbol| self.typing_module_symbols.contains(&symbol))
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn resolved_symbol(&mut self, active: &ActiveScope, source_name: &str) -> Option<SymbolId> {
+        let semantic_name = self.semantic_name(active, source_name);
+        match self.resolve_name(active, &semantic_name).0 {
+            Resolution::Resolved(symbol) => Some(symbol),
+            Resolution::Ambiguous(_) | Resolution::External | Resolution::Unresolved(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AnnotationSite {
+    Ordinary,
+    AnnotatedAssignment { function_local: bool },
+    TypeAliasValue,
+    TypeParameterBound,
+    TypeParameterDefault,
 }
 
 fn declaration_follows_use_or_binding(
@@ -1241,12 +2092,34 @@ fn declaration_follows_use_or_binding(
             .is_some_and(|range| range.start < declaration_range.start)
 }
 
+fn is_reportable_definition_scope(active: &ActiveScope) -> bool {
+    active.kind == ScopeKind::Module && active.forced_phase != Some(ReferencePhase::TypeOnly)
+}
+
 fn reference_phase(active: &ActiveScope, role: ReferenceRole) -> ReferencePhase {
+    if let Some(phase) = active.forced_phase {
+        return phase;
+    }
     match role {
         ReferenceRole::Decorator
         | ReferenceRole::DefaultValue
         | ReferenceRole::BaseClass
-        | ReferenceRole::ClassKeyword => ReferencePhase::DefinitionTime,
+        | ReferenceRole::ClassKeyword
+        | ReferenceRole::Metaclass => ReferencePhase::DefinitionTime,
+        ReferenceRole::Annotation => ReferencePhase::TypeOnly,
+        ReferenceRole::Import => ReferencePhase::ImportTime,
+        ReferenceRole::Export => ReferencePhase::ExportSurface,
+        ReferenceRole::ConfiguredRoot => ReferencePhase::Root,
+        ReferenceRole::Call | ReferenceRole::ModuleAttribute => {
+            if matches!(
+                active.kind,
+                ScopeKind::Function | ScopeKind::Lambda | ScopeKind::Comprehension
+            ) {
+                ReferencePhase::BodyRuntime
+            } else {
+                ReferencePhase::DefinitionTime
+            }
+        }
         ReferenceRole::ComprehensionIterable => {
             if matches!(
                 active.kind,
@@ -1281,6 +2154,15 @@ fn collect_function_declarations(
     }
     declarations.finish();
     declarations
+}
+
+fn function_has_annotation_work(function: &StmtFunctionDef) -> bool {
+    function.type_params.is_some()
+        || function.returns.is_some()
+        || function
+            .parameters
+            .iter_source_order()
+            .any(|parameter| parameter.annotation().is_some())
 }
 
 fn collect_lambda_declarations(
@@ -1333,6 +2215,17 @@ fn collect_statement_declarations(
                 if let Some(default) = parameter.default() {
                     collect_expr_declarations(default, class_mangle, declarations);
                 }
+                if let Some(annotation) = parameter.annotation() {
+                    collect_expr_declarations(annotation, class_mangle, declarations);
+                }
+            }
+            collect_type_param_declarations(
+                function.type_params.as_deref(),
+                class_mangle,
+                declarations,
+            );
+            if let Some(returns) = &function.returns {
+                collect_expr_declarations(returns, class_mangle, declarations);
             }
             declarations.record_binding(
                 mangle_private_name(function.name.id.as_str(), class_mangle),
@@ -1351,6 +2244,11 @@ fn collect_statement_declarations(
                     collect_expr_declarations(&keyword.value, class_mangle, declarations);
                 }
             }
+            collect_type_param_declarations(
+                class.type_params.as_deref(),
+                class_mangle,
+                declarations,
+            );
             declarations.record_binding(
                 mangle_private_name(class.name.id.as_str(), class_mangle),
                 to_range(class.name.range),
@@ -1364,6 +2262,7 @@ fn collect_statement_declarations(
         }
         Stmt::AnnAssign(assign) => {
             collect_target_declarations(&assign.target, class_mangle, declarations);
+            collect_expr_declarations(&assign.annotation, class_mangle, declarations);
             if let Some(value) = &assign.value {
                 collect_expr_declarations(value, class_mangle, declarations);
             }
@@ -1379,6 +2278,12 @@ fn collect_statement_declarations(
         }
         Stmt::TypeAlias(alias) => {
             collect_target_declarations(&alias.name, class_mangle, declarations);
+            collect_type_param_declarations(
+                alias.type_params.as_deref(),
+                class_mangle,
+                declarations,
+            );
+            collect_expr_declarations(&alias.value, class_mangle, declarations);
         }
         Stmt::For(for_stmt) => {
             collect_expr_declarations(&for_stmt.iter, class_mangle, declarations);
@@ -1665,6 +2570,38 @@ fn collect_expr_declarations(
         | Expr::NoneLiteral(_)
         | Expr::EllipsisLiteral(_)
         | Expr::IpyEscapeCommand(_) => {}
+    }
+}
+
+fn collect_type_param_declarations(
+    type_params: Option<&ruff_python_ast::TypeParams>,
+    class_mangle: Option<&str>,
+    declarations: &mut BlockDeclarations,
+) {
+    let Some(type_params) = type_params else {
+        return;
+    };
+    for type_param in &type_params.type_params {
+        match type_param {
+            TypeParam::TypeVar(type_var) => {
+                if let Some(bound) = &type_var.bound {
+                    collect_expr_declarations(bound, class_mangle, declarations);
+                }
+                if let Some(default) = &type_var.default {
+                    collect_expr_declarations(default, class_mangle, declarations);
+                }
+            }
+            TypeParam::TypeVarTuple(type_var_tuple) => {
+                if let Some(default) = &type_var_tuple.default {
+                    collect_expr_declarations(default, class_mangle, declarations);
+                }
+            }
+            TypeParam::ParamSpec(param_spec) => {
+                if let Some(default) = &param_spec.default {
+                    collect_expr_declarations(default, class_mangle, declarations);
+                }
+            }
+        }
     }
 }
 

@@ -11,6 +11,7 @@ use crate::{
     discovery::{discover_project, DiscoveryOptions},
     flow_analysis::analyze_module_flow,
     frontend::{ParseInput, PythonFrontend},
+    part1d_evidence::finalize_part1d_facts,
     ruff_frontend::{parse_ruff_module, RuffFrontend},
     semantic_inventory::collect_module_semantics,
 };
@@ -190,6 +191,9 @@ pub fn analyze_debug_references(
         definitions: graph.definitions,
         references: graph.references,
         context_flow_statuses: graph.context_flow_statuses,
+        definition_effect_sets: graph.definition_effect_sets,
+        overload_groups: graph.overload_groups,
+        internal_candidates: graph.internal_candidates,
         diagnostics,
     })
 }
@@ -251,12 +255,21 @@ fn analyze_semantic_project(
 
         match parse_ruff_module(input) {
             Ok(parsed) => {
-                collect_module_semantics(&mut builder, &mut diagnostics, input, &parsed);
-                analyze_module_flow(&mut builder, input.module_id, &parsed);
+                collect_module_semantics(
+                    &mut builder,
+                    &mut diagnostics,
+                    input,
+                    &parsed,
+                    module.origin_domain,
+                    module.origin_evidence,
+                );
+                analyze_module_flow(&mut builder, input.module_id, &parsed, &input.source.text);
             }
             Err(mut parse_diagnostics) => diagnostics.append(&mut parse_diagnostics),
         }
     }
+
+    finalize_part1d_facts(&mut builder, &mut diagnostics);
 
     diagnostics.sort_by(|left, right| {
         left.path
@@ -290,6 +303,8 @@ fn debug_modules(modules: Vec<cull_core::SemanticModule>) -> Vec<DebugBindingMod
             name: module.name,
             path: module.path,
             future_annotations: module.future_annotations,
+            origin_domain: module.origin_domain,
+            origin_evidence: module.origin_evidence,
             scope: module.scope,
             context: module.context,
         })
