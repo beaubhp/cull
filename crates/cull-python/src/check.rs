@@ -15,7 +15,7 @@ use cull_core::{
     FindingOriginSummary, FindingReachability, FindingReachabilityStatus, FindingReferenceKind,
     FindingRemovalRisk, FindingRule, FindingStatementRange, FindingSubject, FindingSurface,
     FindingType, FindingUncertainty, FindingUncertaintyKind, FlowUncertaintyKind,
-    LocalReachability, ModuleId, OriginDomain, ProjectCompleteness, ProjectMode,
+    LocalReachability, LookupSemantics, ModuleId, OriginDomain, ProjectCompleteness, ProjectMode,
     ReachabilityDomain, ReferenceBindingState, ReferenceFact, ReferencePhase, RemovalRisk,
     ResidualLookup, RootCoverage, RootId, RootInvocation, RootKind, RootOutput, ScopeId, ScopeKind,
     SecondaryCondition, SemanticDefinition, SemanticGraph, SuppressionReason,
@@ -418,17 +418,24 @@ impl BindingUseIndex {
                     }
                     let exact_bindings = facts.binding_set(state.bindings);
                     if exact_bindings.is_empty() {
-                        if let cull_core::Resolution::Resolved(symbol) = reference.lexical_target {
-                            if facts
-                                .bindings_by_symbol
-                                .get(&symbol)
-                                .is_some_and(|bindings| !bindings.is_empty())
+                        let lexical_bindings = lexical_fallback_bindings(reference, facts);
+                        if lexical_bindings.is_empty() {
+                            if let cull_core::Resolution::Resolved(symbol) =
+                                reference.lexical_target
                             {
-                                ambiguous_names.insert((
-                                    reference.source_scope,
-                                    reference.semantic_name.clone(),
-                                ));
+                                if facts
+                                    .bindings_by_symbol
+                                    .get(&symbol)
+                                    .is_some_and(|bindings| !bindings.is_empty())
+                                {
+                                    ambiguous_names.insert((
+                                        reference.source_scope,
+                                        reference.semantic_name.clone(),
+                                    ));
+                                }
                             }
+                        } else {
+                            used.extend(lexical_bindings);
                         }
                     } else {
                         used.extend(exact_bindings.iter().copied());
@@ -464,6 +471,36 @@ impl BindingUseIndex {
         self.ambiguous_names.contains(&(scope, name.to_owned()))
             || self.uncertain_names.contains(&(scope, name.to_owned()))
     }
+}
+
+fn lexical_fallback_bindings(
+    reference: &ReferenceFact,
+    facts: &ProjectFacts<'_>,
+) -> Vec<BindingId> {
+    let cull_core::Resolution::Resolved(symbol) = reference.lexical_target else {
+        return Vec::new();
+    };
+    let Some(bindings) = facts.bindings_by_symbol.get(&symbol) else {
+        return Vec::new();
+    };
+    bindings
+        .iter()
+        .filter_map(|binding| {
+            let binding_fact = facts.binding(*binding)?;
+            fallback_lookup_can_reach_binding(reference, binding_fact).then_some(*binding)
+        })
+        .collect()
+}
+
+fn fallback_lookup_can_reach_binding(reference: &ReferenceFact, binding: &BindingFact) -> bool {
+    if binding.scope == reference.source_scope {
+        return false;
+    }
+    matches!(
+        reference.lookup,
+        LookupSemantics::GlobalThenBuiltin { .. }
+            | LookupSemantics::ClassLocalThenGlobalThenBuiltin { .. }
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -2274,6 +2311,12 @@ impl ReachabilityAnalysis {
             .map(|root| root.target.clone())
             .collect()
     }
+
+    fn has_resolved_production_roots(&self) -> bool {
+        self.roots
+            .iter()
+            .any(|root| root.domain == ReachabilityDomain::Production && root.resolved)
+    }
 }
 
 struct ReachabilityBuilder<'a, 'b, 'c> {
@@ -3975,6 +4018,7 @@ fn build_findings(
     let dead_cluster_members = dead_cluster_members(graph, reachability, mode);
     let dynamic_class_construction =
         dynamic_class_construction_members(graph, facts, resolver, reachability);
+    let has_resolved_production_roots = reachability.has_resolved_production_roots();
 
     let mut findings = Vec::new();
     for definition in graph
@@ -4010,7 +4054,14 @@ fn build_findings(
             .unwrap_or_default();
         let has_inbound = !same_refs.is_empty() || cross_ref_count > 0 || !export_refs.is_empty();
 
-        if is_effectively_reachable(definition, reachability, mode, surface) {
+        if reachability.production_reachable(definition) {
+            continue;
+        }
+        let external_surface_reachable =
+            mode != ProjectMode::Application && reachability.external_surface_reachable(definition);
+        if external_surface_reachable
+            && (surface == DefinitionSurface::Exported || !has_resolved_production_roots)
+        {
             continue;
         }
 
@@ -4061,6 +4112,15 @@ fn build_findings(
         if confidence == FindingConfidence::Review {
             blockers.push(FindingBlocker {
                 kind: blocker_kind_for_reason(&reason),
+                detail: reason.clone(),
+            });
+        }
+        if confidence == FindingConfidence::High && external_surface_reachable {
+            confidence = FindingConfidence::Review;
+            reason = "definition is reachable only from non-production external surface roots"
+                .to_owned();
+            blockers.push(FindingBlocker {
+                kind: FindingBlockerKind::PublicSurfacePolicy,
                 detail: reason.clone(),
             });
         }

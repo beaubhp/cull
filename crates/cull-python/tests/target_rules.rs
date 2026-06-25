@@ -23,6 +23,17 @@ fn check_project(root: &Path) -> cull_core::CheckOutput {
     .unwrap()
 }
 
+fn check_project_in_mode(root: &Path, mode: ProjectMode) -> cull_core::CheckOutput {
+    analyze_check(CheckOptions {
+        project_root: root.to_path_buf(),
+        source_roots: vec![root.join("src")],
+        target_python: None,
+        mode: Some(mode),
+        allow_partial: false,
+    })
+    .unwrap()
+}
+
 fn rule_findings(output: &cull_core::CheckOutput, rule: FindingRule) -> Vec<&cull_core::Finding> {
     output
         .findings
@@ -39,13 +50,62 @@ fn has_rule_name(output: &cull_core::CheckOutput, rule: FindingRule, name: &str)
 }
 
 #[test]
+fn library_public_unexported_definitions_are_review_not_silent() {
+    let temp = tempfile::tempdir().unwrap();
+    write_file(
+        temp.path(),
+        "pyproject.toml",
+        "[tool.cull]\nsrc = 'src'\nmode = 'library'\nroot_coverage = 'complete'\nroots = ['pkg.app:main']\n",
+    );
+    write_file(
+        temp.path(),
+        "src/pkg/__init__.py",
+        "from .api import exported\n__all__ = ['exported']\n",
+    );
+    write_file(
+        temp.path(),
+        "src/pkg/api.py",
+        "def exported():\n    return 1\n",
+    );
+    write_file(temp.path(), "src/pkg/app.py", "def main():\n    return 1\n");
+    write_file(
+        temp.path(),
+        "src/pkg/internal.py",
+        "def public_helper():\n    return 2\n\nclass PublicWidget:\n    pass\n",
+    );
+
+    let output = check_project_in_mode(temp.path(), ProjectMode::Library);
+    let public_helper = output
+        .findings
+        .iter()
+        .find(|finding| {
+            finding.rule_id == FindingRule::Cull001 && finding.subject.name() == "public_helper"
+        })
+        .unwrap_or_else(|| panic!("missing public_helper review finding; output: {output:#?}"));
+    assert_eq!(public_helper.confidence, FindingConfidence::Review);
+
+    let public_widget = output
+        .findings
+        .iter()
+        .find(|finding| {
+            finding.rule_id == FindingRule::Cull002 && finding.subject.name() == "PublicWidget"
+        })
+        .unwrap_or_else(|| panic!("missing PublicWidget review finding; output: {output:#?}"));
+    assert_eq!(public_widget.confidence, FindingConfidence::Review);
+    assert!(
+        !has_rule_name(&output, FindingRule::Cull001, "exported"),
+        "{output:#?}"
+    );
+}
+
+#[test]
 fn unused_import_bindings_are_exact_and_export_aware() {
     let temp = tempfile::tempdir().unwrap();
     write_file(temp.path(), "src/pkg/__init__.py", "");
     write_file(
         temp.path(),
         "src/pkg/api.py",
-        "class Used:\n    pass\n\nclass TypeOnly:\n    pass\n\nclass Exported:\n    pass\n\nclass Unused:\n    pass\n",
+        "class Used:\n    pass\n\nclass TypeOnly:\n    pass\n\nclass Exported:\n    pass\n\nclass Late:\n    pass\n\nclass Unused:\n    pass\n",
     );
     write_file(
         temp.path(),
@@ -60,6 +120,11 @@ fn unused_import_bindings_are_exact_and_export_aware() {
             "__all__ = ['Exported']\n",
             "print(mathematics.pi)\n",
             "def consume(value: Used) -> None:\n",
+            "    instance = Used()\n",
+            "    return instance\n",
+            "def late_import_read_before_write() -> None:\n",
+            "    print(Late)\n",
+            "    from pkg.api import Late\n",
             "    pass\n",
             "if TYPE_CHECKING:\n",
             "    from pkg.api import TypeOnly\n",
@@ -79,6 +144,7 @@ fn unused_import_bindings_are_exact_and_export_aware() {
     assert!(names.contains(&"os"), "{output:#?}");
     assert!(names.contains(&"sys"), "{output:#?}");
     assert!(names.contains(&"Alias"), "{output:#?}");
+    assert!(names.contains(&"Late"), "{output:#?}");
     assert!(!names.contains(&"mathematics"), "{output:#?}");
     assert!(!names.contains(&"Used"), "{output:#?}");
     assert!(!names.contains(&"TypeOnly"), "{output:#?}");
@@ -99,6 +165,11 @@ fn unused_import_bindings_are_exact_and_export_aware() {
             "{name}: {finding:#?}"
         );
     }
+    let late_import = unused_imports
+        .iter()
+        .find(|finding| finding.subject.name() == "Late")
+        .unwrap_or_else(|| panic!("missing unused import Late; output: {output:#?}"));
+    assert_eq!(late_import.confidence, FindingConfidence::Review);
 }
 
 #[test]
