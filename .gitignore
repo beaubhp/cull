@@ -1,4 +1,7 @@
 /target/
 /fuzz/target/
 /.context/
-/benchmarks/release/results/
+__pycache__/
+*.pyc
+/benchmark/results/*
+!/benchmark/results/.gitignore

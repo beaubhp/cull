@@ -1,0 +1,9 @@
+[project]
+name = "ml-signal-lab"
+version = "0.1.0"
+
+[tool.cull]
+src = "src"
+mode = "application"
+root_coverage = "complete"
+roots = ["ml_signal_lab.main:main"]

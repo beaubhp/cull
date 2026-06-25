@@ -72,17 +72,25 @@ impl FromStr for PythonVersion {
     type Err = PythonVersionParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let value = value.strip_prefix("py").unwrap_or(value);
-        let value = value.strip_prefix("python").unwrap_or(value);
-        let (major, minor) = value
-            .split_once('.')
-            .ok_or_else(|| PythonVersionParseError(value.to_owned()))?;
+        let original = value.trim();
+        let normalized = original.to_ascii_lowercase();
+        let value = normalized
+            .strip_prefix("python")
+            .or_else(|| normalized.strip_prefix("py"))
+            .unwrap_or(&normalized);
+        let (major, minor) = if let Some((major, minor)) = value.split_once('.') {
+            (major, minor)
+        } else if value.len() >= 2 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+            value.split_at(1)
+        } else {
+            return Err(PythonVersionParseError(original.to_owned()));
+        };
         let major = major
             .parse()
-            .map_err(|_| PythonVersionParseError(value.to_owned()))?;
+            .map_err(|_| PythonVersionParseError(original.to_owned()))?;
         let minor = minor
             .parse()
-            .map_err(|_| PythonVersionParseError(value.to_owned()))?;
+            .map_err(|_| PythonVersionParseError(original.to_owned()))?;
         Ok(Self { major, minor })
     }
 }
@@ -90,6 +98,27 @@ impl FromStr for PythonVersion {
 #[derive(Debug, Error)]
 #[error("invalid Python version `{0}`")]
 pub struct PythonVersionParseError(String);
+
+#[cfg(test)]
+mod tests {
+    use super::PythonVersion;
+
+    #[test]
+    fn parses_common_python_version_spellings() {
+        for spelling in ["3.14", "py3.14", "python3.14", "py314", "python314"] {
+            assert_eq!(
+                spelling.parse::<PythonVersion>().unwrap(),
+                PythonVersion::PY314
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_python_version_spellings() {
+        assert!("py".parse::<PythonVersion>().is_err());
+        assert!("three.fourteen".parse::<PythonVersion>().is_err());
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DecodedSourceInfo {

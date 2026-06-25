@@ -3,8 +3,8 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand, ValueEnum};
 use cull_core::{
     Candidate, CandidateSummary, CheckAnalysis, CheckOutput, DefinitionKind, Diagnostic,
-    DiagnosticSeverity, ExplainOutput, ExplainResult, FindingConfidence, ProjectCompleteness,
-    ProjectMode, PythonVersion, RootCoverage,
+    DiagnosticSeverity, ExplainOutput, ExplainResult, FindingConfidence, FindingSubject,
+    FindingType, ProjectCompleteness, ProjectMode, PythonVersion, RootCoverage,
 };
 use cull_python::{
     analyze_check, analyze_debug_bindings, analyze_debug_candidates, analyze_debug_definitions,
@@ -372,9 +372,9 @@ fn render_text_output(output: &CheckOutput, show_review: bool) {
         first = false;
         println!(
             "{}:{}:{} {} {}",
-            finding.definition.file,
-            finding.definition.line,
-            finding.definition.column,
+            finding.subject.file(),
+            finding.subject.line(),
+            finding.subject.column(),
             finding.rule_id.code(),
             finding.rule_id.text_name()
         );
@@ -421,12 +421,11 @@ fn explain_selector(
             .candidates
             .iter()
             .filter(|candidate| {
-                candidate.definition.qualified_name == selector
-                    || candidate.definition.name == selector
-                    || format!(
-                        "{}::{}",
-                        candidate.definition.module, candidate.definition.name
-                    ) == selector
+                candidate.subject_id == selector
+                    || candidate.subject.qualified_name() == selector
+                    || candidate.subject.name() == selector
+                    || subject_module_name(&candidate.subject)
+                        .is_some_and(|module_name| module_name == selector)
             })
             .map(candidate_summary)
             .collect::<Vec<_>>();
@@ -469,10 +468,10 @@ fn candidate_summary(candidate: &Candidate) -> CandidateSummary {
         rule_id: candidate.rule_id,
         status: candidate.status,
         confidence: candidate.confidence,
-        qualified_name: candidate.definition.qualified_name.clone(),
-        file: candidate.definition.file.clone(),
-        line: candidate.definition.line,
-        column: candidate.definition.column,
+        qualified_name: candidate.subject.qualified_name(),
+        file: candidate.subject.file().to_owned(),
+        line: candidate.subject.line(),
+        column: candidate.subject.column(),
     }
 }
 
@@ -504,9 +503,9 @@ fn render_explain_output(output: &ExplainOutput) {
 fn render_candidate_explanation(candidate: &Candidate) {
     println!(
         "{}:{}:{} {} {}",
-        candidate.definition.file,
-        candidate.definition.line,
-        candidate.definition.column,
+        candidate.subject.file(),
+        candidate.subject.line(),
+        candidate.subject.column(),
         candidate.rule_id.code(),
         candidate.rule_id.text_name()
     );
@@ -539,23 +538,12 @@ fn render_candidate_explanation(candidate: &Candidate) {
 }
 
 fn finding_type_summary(candidate: &Candidate) -> String {
-    match candidate.finding_type {
-        cull_core::FindingType::Unreferenced => format!(
-            "{} `{}` has no resolved inbound references under Cull's static model.",
-            definition_label(candidate.definition.kind),
-            candidate.definition.name
-        ),
-        cull_core::FindingType::RootUnreachable => format!(
-            "{} `{}` has no runtime path from Cull's recognized roots.",
-            definition_label(candidate.definition.kind),
-            candidate.definition.name
-        ),
-    }
+    subject_finding_summary(candidate.finding_type, &candidate.subject)
 }
 
 fn error_check_output(diagnostic: Diagnostic) -> CheckOutput {
     CheckOutput {
-        schema_version: 2,
+        schema_version: 3,
         analysis: CheckAnalysis {
             mode: ProjectMode::Auto,
             target_python: PythonVersion::default(),
@@ -576,7 +564,7 @@ fn error_check_output(diagnostic: Diagnostic) -> CheckOutput {
 
 fn error_explain_output(diagnostic: Diagnostic) -> ExplainOutput {
     ExplainOutput {
-        schema_version: 2,
+        schema_version: 3,
         selector: String::new(),
         analysis: CheckAnalysis {
             mode: ProjectMode::Auto,
@@ -597,6 +585,38 @@ fn definition_label(kind: DefinitionKind) -> &'static str {
     }
 }
 
+fn subject_label(subject: &FindingSubject) -> &'static str {
+    match subject {
+        FindingSubject::Definition { definition } => definition_label(definition.kind),
+        FindingSubject::Binding { .. } => "Binding",
+        FindingSubject::ImportBinding { .. } => "Import binding",
+        FindingSubject::StatementRange { .. } => "Statement range",
+    }
+}
+
+fn subject_kind_label(subject: &FindingSubject) -> &'static str {
+    match subject.definition() {
+        Some(definition) => definition_label(definition.kind),
+        None => subject_label(subject),
+    }
+}
+
+fn subject_module_name(subject: &FindingSubject) -> Option<String> {
+    match subject {
+        FindingSubject::Definition { definition } => {
+            Some(format!("{}::{}", definition.module, definition.name))
+        }
+        FindingSubject::Binding { binding } => {
+            Some(format!("{}::{}", binding.module, binding.name))
+        }
+        FindingSubject::ImportBinding { import_binding } => Some(format!(
+            "{}::{}",
+            import_binding.module, import_binding.bound_name
+        )),
+        FindingSubject::StatementRange { .. } => None,
+    }
+}
+
 fn confidence_label(confidence: FindingConfidence) -> &'static str {
     match confidence {
         FindingConfidence::High => "high",
@@ -605,16 +625,35 @@ fn confidence_label(confidence: FindingConfidence) -> &'static str {
 }
 
 fn finding_summary(finding: &cull_core::Finding) -> String {
-    match finding.finding_type {
-        cull_core::FindingType::Unreferenced => format!(
+    subject_finding_summary(finding.finding_type, &finding.subject)
+}
+
+fn subject_finding_summary(finding_type: FindingType, subject: &FindingSubject) -> String {
+    match finding_type {
+        FindingType::Unreferenced => format!(
             "{} `{}` has no resolved inbound references under Cull's static model.",
-            definition_label(finding.definition.kind),
-            finding.definition.name
+            subject_kind_label(subject),
+            subject.name()
         ),
-        cull_core::FindingType::RootUnreachable => format!(
+        FindingType::RootUnreachable => format!(
             "{} `{}` has no runtime path from Cull's recognized roots.",
-            definition_label(finding.definition.kind),
-            finding.definition.name
+            subject_kind_label(subject),
+            subject.name()
+        ),
+        FindingType::UnusedImport => format!(
+            "Import binding `{}` has no may-execute references to the exact binding.",
+            subject.name()
+        ),
+        FindingType::UnusedLocalBinding => format!(
+            "Local binding `{}` has no may-execute reads of the exact binding.",
+            subject.name()
+        ),
+        FindingType::UnreachableStatement => {
+            "Statement range cannot execute after a preceding terminal statement.".to_owned()
+        }
+        FindingType::UnusedPrivateMethod => format!(
+            "Private method `{}` has no resolved method references under Cull's static model.",
+            subject.name()
         ),
     }
 }

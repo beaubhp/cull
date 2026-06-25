@@ -1,0 +1,9 @@
+[project]
+name = "api-taskforge"
+version = "0.1.0"
+
+[tool.cull]
+src = "src"
+mode = "application"
+root_coverage = "complete"
+roots = ["api_taskforge.main:main"]

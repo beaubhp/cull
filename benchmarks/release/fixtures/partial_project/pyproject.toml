@@ -1,4 +1,0 @@
-[tool.cull]
-src = "src"
-mode = "application"
-allow_partial = true

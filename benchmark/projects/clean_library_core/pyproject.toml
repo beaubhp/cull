@@ -1,0 +1,9 @@
+[project]
+name = "clean-library-core"
+version = "0.1.0"
+
+[tool.cull]
+src = "src"
+mode = "library"
+root_coverage = "complete"
+roots = ["clean_library_core.main:main"]

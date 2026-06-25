@@ -1,0 +1,9 @@
+[project]
+name = "configsmith"
+version = "0.1.0"
+
+[tool.cull]
+src = "src"
+mode = "application"
+root_coverage = "complete"
+roots = ["configsmith.main:main"]

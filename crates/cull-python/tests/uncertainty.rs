@@ -43,12 +43,12 @@ fn finding<'a>(output: &'a cull_core::CheckOutput, name: &str) -> &'a cull_core:
     output
         .findings
         .iter()
-        .find(|finding| finding.definition.name == name)
+        .find(|finding| finding.subject.definition().is_some() && finding.subject.name() == name)
         .unwrap_or_else(|| panic!("missing finding for {name}; output: {output:#?}"))
 }
 
 #[test]
-fn schema_v2_findings_have_ids_evidence_and_reported_status() {
+fn schema_v3_findings_have_subjects_ids_evidence_and_reported_status() {
     let temp = tempfile::tempdir().unwrap();
     write_file(temp.path(), "src/pkg/__init__.py", "");
     write_file(temp.path(), "src/pkg/mod.py", "def dead():\n    pass\n");
@@ -56,7 +56,8 @@ fn schema_v2_findings_have_ids_evidence_and_reported_status() {
     let output = check_project(temp.path(), ProjectMode::Application, false);
     let dead = finding(&output, "dead");
 
-    assert_eq!(output.schema_version, 2);
+    assert_eq!(output.schema_version, 3);
+    assert_eq!(dead.subject.name(), "dead");
     assert_eq!(output.analysis.mode, ProjectMode::Application);
     assert_eq!(dead.status, CandidateStatus::Reported);
     assert!(dead.finding_id.starts_with("CULL001-"));
@@ -94,7 +95,7 @@ fn debug_candidates_include_suppressed_non_primary_rule_alternatives() {
 
     let debug = debug_candidates(temp.path(), ProjectMode::Application, false);
     assert!(debug.candidates.iter().any(|candidate| {
-        candidate.definition.name == "dormant"
+        candidate.subject.name() == "dormant"
             && candidate.rule_id == FindingRule::Cull003
             && candidate.status == CandidateStatus::Suppressed
             && candidate
@@ -191,10 +192,9 @@ fn literal_getattr_on_known_module_is_an_exact_reference() {
     );
 
     let output = check_project(temp.path(), ProjectMode::Application, false);
-    assert!(output
-        .findings
-        .iter()
-        .all(|finding| finding.definition.name != "handler"));
+    assert!(output.findings.iter().all(|finding| {
+        finding.subject.definition().is_none() || finding.subject.name() != "handler"
+    }));
 }
 
 #[test]
@@ -209,10 +209,9 @@ fn literal_hasattr_on_known_module_is_an_exact_reference() {
     );
 
     let output = check_project(temp.path(), ProjectMode::Application, false);
-    assert!(output
-        .findings
-        .iter()
-        .all(|finding| finding.definition.name != "handler"));
+    assert!(output.findings.iter().all(|finding| {
+        finding.subject.definition().is_none() || finding.subject.name() != "handler"
+    }));
 }
 
 #[test]

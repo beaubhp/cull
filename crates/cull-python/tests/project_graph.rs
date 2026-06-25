@@ -28,7 +28,7 @@ fn finding<'a>(output: &'a cull_core::CheckOutput, name: &str) -> Option<&'a cul
     output
         .findings
         .iter()
-        .find(|finding| finding.definition.name == name)
+        .find(|finding| finding.subject.definition().is_some() && finding.subject.name() == name)
 }
 
 fn assert_no_error_diagnostics(output: &cull_core::CheckOutput) {
@@ -261,8 +261,8 @@ fn finding_order_is_stable_across_file_creation_order() {
         .iter()
         .map(|finding| {
             (
-                finding.definition.file.clone(),
-                finding.definition.name.clone(),
+                finding.subject.file().to_owned(),
+                finding.subject.name().to_owned(),
                 finding.confidence,
             )
         })
@@ -272,8 +272,8 @@ fn finding_order_is_stable_across_file_creation_order() {
         .iter()
         .map(|finding| {
             (
-                finding.definition.file.clone(),
-                finding.definition.name.clone(),
+                finding.subject.file().to_owned(),
+                finding.subject.name().to_owned(),
                 finding.confidence,
             )
         })

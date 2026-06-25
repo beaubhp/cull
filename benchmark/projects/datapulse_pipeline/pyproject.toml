@@ -1,0 +1,9 @@
+[project]
+name = "datapulse-pipeline"
+version = "0.1.0"
+
+[tool.cull]
+src = "src"
+mode = "application"
+root_coverage = "complete"
+roots = ["datapulse_pipeline.main:main"]

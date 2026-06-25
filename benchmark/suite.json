@@ -1,0 +1,174 @@
+{
+  "description": "Cull benchmark: 15 artificial realistic Python projects with exact expected dead-code findings.",
+  "projects": [
+    {
+      "expected": "expected/api_taskforge.json",
+      "id": "api_taskforge",
+      "mode": "application",
+      "path": "projects/api_taskforge",
+      "shape": "FastAPI-style service with routes, schemas, service layer, and background jobs.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/ledgerflow.json",
+      "id": "ledgerflow",
+      "mode": "application",
+      "path": "projects/ledgerflow",
+      "shape": "SaaS/business backend with billing, accounts, reports, and policy helpers.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/datapulse_pipeline.json",
+      "id": "datapulse_pipeline",
+      "mode": "application",
+      "path": "projects/datapulse_pipeline",
+      "shape": "ETL/data pipeline with loaders, transforms, validators, and sinks.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/autocli_ops.json",
+      "id": "autocli_ops",
+      "mode": "application",
+      "path": "projects/autocli_ops",
+      "shape": "CLI automation app with commands, config loading, and file operations.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/plugin_market.json",
+      "id": "plugin_market",
+      "mode": "application",
+      "path": "projects/plugin_market",
+      "shape": "Plugin/registry architecture with dynamic-looking but statically declared registries.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/ml_signal_lab.json",
+      "id": "ml_signal_lab",
+      "mode": "application",
+      "path": "projects/ml_signal_lab",
+      "shape": "ML-ish workflow with training helpers, feature extraction, and evaluation utilities.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/async_worker_hub.json",
+      "id": "async_worker_hub",
+      "mode": "application",
+      "path": "projects/async_worker_hub",
+      "shape": "Async scheduler/worker app with task dispatch, retries, and event handlers.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/configsmith.json",
+      "id": "configsmith",
+      "mode": "application",
+      "path": "projects/configsmith",
+      "shape": "Config-heavy package with dataclasses, validators, defaults, and environment adapters.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/exportkit.json",
+      "id": "exportkit",
+      "mode": "library",
+      "path": "projects/exportkit",
+      "shape": "Library package with __all__, re-exports, and public/private API boundaries.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/namespace_mesh.json",
+      "id": "namespace_mesh",
+      "mode": "application",
+      "path": "projects/namespace_mesh",
+      "shape": "Import/package edge cases with aliases, relative imports, package attributes, and cycles.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/test_reach_app.json",
+      "id": "test_reach_app",
+      "mode": "application",
+      "path": "projects/test_reach_app",
+      "shape": "Code where test reachability and production reachability intentionally differ.",
+      "source_roots": [
+        "src",
+        "tests"
+      ]
+    },
+    {
+      "expected": "expected/ai_util_sprawl.json",
+      "id": "ai_util_sprawl",
+      "large": true,
+      "mode": "application",
+      "path": "projects/ai_util_sprawl",
+      "shape": "Messy utility-heavy AI-era project with many plausible helpers and some quiet dead paths.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "clean": true,
+      "expected": "expected/clean_service_core.json",
+      "id": "clean_service_core",
+      "mode": "application",
+      "path": "projects/clean_service_core",
+      "shape": "Clean application negative control with no expected findings.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "clean": true,
+      "expected": "expected/clean_library_core.json",
+      "id": "clean_library_core",
+      "mode": "library",
+      "path": "projects/clean_library_core",
+      "shape": "Clean library negative control with exports and no expected findings.",
+      "source_roots": [
+        "src"
+      ]
+    },
+    {
+      "expected": "expected/graphstress_large.json",
+      "id": "graphstress_large",
+      "large": true,
+      "mode": "application",
+      "path": "projects/graphstress_large",
+      "shape": "Larger import graph and symbol-volume stress project.",
+      "source_roots": [
+        "src"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "tools": {
+    "cull": {
+      "scope": "high-confidence Cull findings"
+    },
+    "deadcode": {
+      "scope": "parsed comparable dead-code findings",
+      "version": "2.4.1"
+    },
+    "vulture": {
+      "scope": "parsed comparable dead-code findings",
+      "version": "2.16"
+    }
+  }
+}

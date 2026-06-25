@@ -1,0 +1,9 @@
+[project]
+name = "async-worker-hub"
+version = "0.1.0"
+
+[tool.cull]
+src = "src"
+mode = "application"
+root_coverage = "complete"
+roots = ["async_worker_hub.main:main"]

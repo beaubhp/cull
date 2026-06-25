@@ -7,23 +7,23 @@ pub mod source;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity};
 pub use ids::{
-    BindingId, BindingSetId, CandidateId, CandidateSubjectId, ContextId, DefId,
-    DefinitionEffectSetId, FileId, FlowUncertaintySetId, InternalCandidateId, LoopId, ModuleId,
-    OverloadGroupId, ReferenceId, RootId, ScopeId, SymbolId,
+    BindingId, BindingSetId, ContextId, DefId, DefinitionEffectSetId, FileId, FlowUncertaintySetId,
+    InternalCandidateId, LoopId, ModuleId, OverloadGroupId, ReferenceId, RootId, ScopeId, SymbolId,
 };
 pub use ir::{DefinitionIr, DefinitionKey, DefinitionKind, ModuleIr};
 pub use output::{
     Candidate, CandidateStatus, CandidateSummary, CheckAnalysis, CheckOutput, CheckSummary,
     DebugBindingModule, DebugBindingsOutput, DebugCandidatesOutput, DebugDefinition,
     DebugDefinitionsOutput, DebugModule, DebugReferencesOutput, DefinitionSurface, EvidenceKind,
-    EvidenceRecord, ExplainOutput, ExplainResult, Finding, FindingBlocker, FindingBlockerKind,
-    FindingConfidence, FindingDefinition, FindingExport, FindingExportKind, FindingModeEffect,
-    FindingOriginSummary, FindingPhaseSummary, FindingReachability, FindingReachabilityStatus,
-    FindingReference, FindingReferenceKind, FindingRemovalRisk, FindingRule, FindingType,
-    FindingUncertainty, FindingUncertaintyKind, ProjectCompleteness, ProjectCompletenessStatus,
-    ProjectMode, ReachabilityDomain, RootCoverage, RootInvocation, RootKind, RootOutput,
-    SecondaryCondition, SkippedFile, SourceRootOutput, SuppressionReason, SuppressionReasonKind,
-    UncertaintyEffect, UncertaintyRegion, UncertaintyRegionKind,
+    EvidenceRecord, ExplainOutput, ExplainResult, Finding, FindingBinding, FindingBlocker,
+    FindingBlockerKind, FindingConfidence, FindingDefinition, FindingExport, FindingExportKind,
+    FindingImportBinding, FindingImportKind, FindingModeEffect, FindingOriginSummary,
+    FindingPhaseSummary, FindingReachability, FindingReachabilityStatus, FindingReference,
+    FindingReferenceKind, FindingRemovalRisk, FindingRule, FindingStatementRange, FindingSubject,
+    FindingSurface, FindingType, FindingUncertainty, FindingUncertaintyKind, ProjectCompleteness,
+    ProjectCompletenessStatus, ProjectMode, ReachabilityDomain, RootCoverage, RootInvocation,
+    RootKind, RootOutput, SecondaryCondition, SkippedFile, SourceRootOutput, SuppressionReason,
+    SuppressionReasonKind, UncertaintyEffect, UncertaintyRegion, UncertaintyRegionKind,
 };
 pub use semantic::{
     AnnotationEvaluation, AnnotationSemantics, BindingFact, BindingInput, BindingKind,

@@ -28,16 +28,15 @@ fn finding<'a>(output: &'a cull_core::CheckOutput, name: &str) -> &'a cull_core:
     output
         .findings
         .iter()
-        .find(|finding| finding.definition.name == name)
+        .find(|finding| finding.subject.definition().is_some() && finding.subject.name() == name)
         .unwrap_or_else(|| panic!("missing finding for {name}; output: {output:#?}"))
 }
 
 fn assert_no_finding(output: &cull_core::CheckOutput, name: &str) {
     assert!(
-        output
-            .findings
-            .iter()
-            .all(|finding| finding.definition.name != name),
+        output.findings.iter().all(|finding| {
+            finding.subject.definition().is_none() || finding.subject.name() != name
+        }),
         "unexpected finding for {name}; output: {output:#?}"
     );
 }
@@ -46,8 +45,8 @@ fn assert_no_method_findings(output: &cull_core::CheckOutput) {
     assert!(
         output.findings.iter().all(|finding| {
             !finding
-                .definition
-                .qualified_name
+                .subject
+                .qualified_name()
                 .split_once("::")
                 .is_some_and(|(_, local)| local.contains('.'))
         }),

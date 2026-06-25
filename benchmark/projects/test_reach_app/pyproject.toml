@@ -1,0 +1,9 @@
+[project]
+name = "test-reach-app"
+version = "0.1.0"
+
+[tool.cull]
+src = "src"
+mode = "application"
+root_coverage = "complete"
+roots = ["test_reach_app.main:main"]

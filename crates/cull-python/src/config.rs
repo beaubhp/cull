@@ -95,6 +95,10 @@ pub enum ConfigError {
     InvalidMode(String),
     #[error("invalid [tool.cull].root_coverage `{0}`; expected complete or partial")]
     InvalidRootCoverage(String),
+    #[error(
+        "invalid [tool.cull].target-python/target-version `{0}`; expected 3.14, py3.14, or py314"
+    )]
+    InvalidTargetPython(String),
     #[error("invalid root object reference `{0}`; expected module or module:object.attr")]
     InvalidRootReference(String),
     #[error("invalid project script object reference for `{name}`: `{target}`; expected module:object.attr")]
@@ -167,13 +171,19 @@ pub fn load_project_config(project_root: &Path) -> Result<ProjectConfig, ConfigE
         .map(|root| parse_root_selector(&root).ok_or(ConfigError::InvalidRootReference(root)))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let target_python = match cull.target_python.or(cull.target_version) {
+        Some(value) => Some(
+            value
+                .parse()
+                .map_err(|_| ConfigError::InvalidTargetPython(value))?,
+        ),
+        None => None,
+    };
+
     Ok(ProjectConfig {
         source_roots: cull.src.map(StringOrVec::into_vec).unwrap_or_default(),
         excludes: cull.exclude.unwrap_or_default(),
-        target_python: cull
-            .target_python
-            .or(cull.target_version)
-            .and_then(|value| value.parse().ok()),
+        target_python,
         mode,
         test_paths,
         test_path_origin_evidence,
@@ -211,12 +221,16 @@ struct Tool {
 struct ToolCull {
     src: Option<StringOrVec>,
     exclude: Option<Vec<String>>,
+    #[serde(alias = "target-python")]
     target_python: Option<String>,
+    #[serde(alias = "target-version")]
     target_version: Option<String>,
     tests: Option<StringOrVec>,
     mode: Option<String>,
     roots: Option<Vec<String>>,
+    #[serde(alias = "root-coverage")]
     root_coverage: Option<String>,
+    #[serde(alias = "allow-partial")]
     allow_partial: Option<bool>,
 }
 

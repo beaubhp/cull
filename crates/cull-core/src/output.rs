@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BindingFact, BindingSetFact, ContextFact, ContextFlowStatusFact, DefinitionEffectKind,
-    DefinitionKind, Diagnostic, FlowUncertaintySetFact, InternalCandidateFact, OriginDomain,
-    OriginEvidence, OverloadGroupFact, PythonVersion, ReferenceFact, ReferencePhase, RemovalRisk,
-    RootId, ScopeFact, SemanticDefinition, SymbolFact, TextRange,
+    BindingFact, BindingId, BindingKind, BindingSetFact, ContextFact, ContextFlowStatusFact,
+    ContextKind, DefId, DefinitionEffectKind, DefinitionKind, Diagnostic, FlowUncertaintySetFact,
+    InternalCandidateFact, OriginDomain, OriginEvidence, OverloadGroupFact, PythonVersion,
+    ReferenceFact, ReferencePhase, RemovalRisk, RootId, ScopeFact, ScopeKind, SemanticDefinition,
+    SymbolFact, TextRange,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -118,7 +119,9 @@ pub struct Finding {
     pub id: String,
     pub rule_id: FindingRule,
     pub finding_type: FindingType,
-    pub definition: FindingDefinition,
+    pub subject: FindingSubject,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition: Option<FindingDefinition>,
     pub status: CandidateStatus,
     pub confidence: FindingConfidence,
     pub confidence_ceiling: FindingConfidence,
@@ -142,7 +145,9 @@ pub struct Candidate {
     pub subject_id: String,
     pub rule_id: FindingRule,
     pub finding_type: FindingType,
-    pub definition: FindingDefinition,
+    pub subject: FindingSubject,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition: Option<FindingDefinition>,
     pub status: CandidateStatus,
     pub confidence: Option<FindingConfidence>,
     pub confidence_ceiling: FindingConfidence,
@@ -169,6 +174,10 @@ pub enum FindingRule {
     Cull002,
     Cull003,
     Cull004,
+    Cull005,
+    Cull006,
+    Cull007,
+    Cull008,
 }
 
 impl FindingRule {
@@ -178,6 +187,10 @@ impl FindingRule {
             Self::Cull002 => "CULL002",
             Self::Cull003 => "CULL003",
             Self::Cull004 => "CULL004",
+            Self::Cull005 => "CULL005",
+            Self::Cull006 => "CULL006",
+            Self::Cull007 => "CULL007",
+            Self::Cull008 => "CULL008",
         }
     }
 
@@ -187,6 +200,10 @@ impl FindingRule {
             Self::Cull002 => "unreferenced-class",
             Self::Cull003 => "unreachable-function",
             Self::Cull004 => "unreachable-class",
+            Self::Cull005 => "unused-import",
+            Self::Cull006 => "unused-local-binding",
+            Self::Cull007 => "unreachable-code",
+            Self::Cull008 => "unused-private-method",
         }
     }
 }
@@ -196,6 +213,10 @@ impl FindingRule {
 pub enum FindingType {
     Unreferenced,
     RootUnreachable,
+    UnusedImport,
+    UnusedLocalBinding,
+    UnreachableStatement,
+    UnusedPrivateMethod,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -259,18 +280,180 @@ pub enum EvidenceKind {
     ConfidenceBlocker,
     Uncertainty,
     SecondaryCondition,
+    BindingUsedness,
+    StatementReachability,
+    SubjectPolicy,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FindingDefinition {
+    pub def_id: DefId,
     pub kind: DefinitionKind,
     pub name: String,
     pub qualified_name: String,
     pub module: String,
     pub file: String,
     pub range: TextRange,
+    pub name_range: TextRange,
     pub line: u32,
     pub column: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "subject_type")]
+pub enum FindingSubject {
+    Definition {
+        #[serde(flatten)]
+        definition: FindingDefinition,
+    },
+    Binding {
+        #[serde(flatten)]
+        binding: FindingBinding,
+    },
+    ImportBinding {
+        #[serde(flatten)]
+        import_binding: FindingImportBinding,
+    },
+    StatementRange {
+        #[serde(flatten)]
+        statement_range: FindingStatementRange,
+    },
+}
+
+impl FindingSubject {
+    pub fn file(&self) -> &str {
+        match self {
+            Self::Definition { definition } => &definition.file,
+            Self::Binding { binding } => &binding.file,
+            Self::ImportBinding { import_binding } => &import_binding.file,
+            Self::StatementRange { statement_range } => &statement_range.file,
+        }
+    }
+
+    pub fn range(&self) -> TextRange {
+        match self {
+            Self::Definition { definition } => definition.range,
+            Self::Binding { binding } => binding.range,
+            Self::ImportBinding { import_binding } => import_binding.statement_range,
+            Self::StatementRange { statement_range } => statement_range.range,
+        }
+    }
+
+    pub fn line(&self) -> u32 {
+        match self {
+            Self::Definition { definition } => definition.line,
+            Self::Binding { binding } => binding.line,
+            Self::ImportBinding { import_binding } => import_binding.line,
+            Self::StatementRange { statement_range } => statement_range.start_line,
+        }
+    }
+
+    pub fn column(&self) -> u32 {
+        match self {
+            Self::Definition { definition } => definition.column,
+            Self::Binding { binding } => binding.column,
+            Self::ImportBinding { import_binding } => import_binding.column,
+            Self::StatementRange { statement_range } => statement_range.start_column,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Definition { definition } => &definition.name,
+            Self::Binding { binding } => &binding.name,
+            Self::ImportBinding { import_binding } => &import_binding.bound_name,
+            Self::StatementRange { .. } => "<unreachable statements>",
+        }
+    }
+
+    pub fn qualified_name(&self) -> String {
+        match self {
+            Self::Definition { definition } => definition.qualified_name.clone(),
+            Self::Binding { binding } => binding
+                .owner_definition
+                .as_ref()
+                .map(|owner| format!("{owner}::{}", binding.name))
+                .unwrap_or_else(|| format!("{}::{}", binding.module, binding.name)),
+            Self::ImportBinding { import_binding } => {
+                format!("{}::{}", import_binding.module, import_binding.bound_name)
+            }
+            Self::StatementRange { statement_range } => statement_range
+                .owner_definition
+                .as_ref()
+                .map(|owner| format!("{owner}::<unreachable@{}>", statement_range.range.start))
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}::<unreachable@{}>",
+                        statement_range.module, statement_range.range.start
+                    )
+                }),
+        }
+    }
+
+    pub fn definition(&self) -> Option<&FindingDefinition> {
+        match self {
+            Self::Definition { definition } => Some(definition),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FindingBinding {
+    pub binding_id: BindingId,
+    pub binding_kind: BindingKind,
+    pub name: String,
+    pub semantic_name: String,
+    pub module: String,
+    pub scope_kind: ScopeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_definition: Option<String>,
+    pub file: String,
+    pub range: TextRange,
+    pub name_range: TextRange,
+    pub line: u32,
+    pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<BindingId>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingImportKind {
+    Import,
+    ImportFrom,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FindingImportBinding {
+    pub binding_id: BindingId,
+    pub import_kind: FindingImportKind,
+    pub bound_name: String,
+    pub semantic_name: String,
+    pub requested_module_or_member: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    pub module: String,
+    pub file: String,
+    pub statement_range: TextRange,
+    pub name_range: TextRange,
+    pub line: u32,
+    pub column: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FindingStatementRange {
+    pub module: String,
+    pub file: String,
+    pub range: TextRange,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+    pub statement_count: usize,
+    pub context_kind: ContextKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_definition: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -388,20 +571,26 @@ pub enum FindingExportKind {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FindingModeEffect {
     pub mode: ProjectMode,
-    pub surface: DefinitionSurface,
+    pub surface: FindingSurface,
     pub confidence_ceiling: FindingConfidence,
     pub reason: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DefinitionSurface {
+pub enum FindingSurface {
     Exported,
     ModuleProtocolHook,
     SpecialDunder,
     Private,
     Public,
+    Local,
+    Import,
+    Statement,
+    NotApplicable,
 }
+
+pub type DefinitionSurface = FindingSurface;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FindingUncertainty {

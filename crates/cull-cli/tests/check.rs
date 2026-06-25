@@ -49,7 +49,7 @@ fn json_includes_review_findings_without_default_visible_exit_code() {
 
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["schema_version"], 2);
+    assert_eq!(json["schema_version"], 3);
     assert_eq!(json["summary"]["review"], 1);
     assert_eq!(json["findings"][0]["definition"]["name"], "public_dead");
     assert_eq!(json["findings"][0]["confidence"], "review");
@@ -124,6 +124,43 @@ fn invalid_config_mode_exits_two() {
 }
 
 #[test]
+fn invalid_config_target_python_exits_two() {
+    let temp = tempfile::tempdir().unwrap();
+    write_file(temp.path(), "src/pkg/__init__.py", "");
+    write_file(
+        temp.path(),
+        "pyproject.toml",
+        "[tool.cull]\nsrc = 'src'\ntarget-python = 'latest'\n",
+    );
+
+    let output = cull().arg("check").arg(temp.path()).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid [tool.cull].target-python"));
+}
+
+#[test]
+fn config_target_python_accepts_python_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    write_file(temp.path(), "src/pkg/__init__.py", "");
+    write_file(
+        temp.path(),
+        "src/pkg/module.py",
+        "def public_dead():\n    pass\n",
+    );
+    write_file(
+        temp.path(),
+        "pyproject.toml",
+        "[tool.cull]\nsrc = 'src'\ntarget-python = 'python3.14'\n",
+    );
+
+    let output = cull().arg("check").arg(temp.path()).output().unwrap();
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+}
+
+#[test]
 fn invalid_config_mode_in_json_emits_valid_json_error_document() {
     let temp = tempfile::tempdir().unwrap();
     write_file(temp.path(), "src/pkg/__init__.py", "");
@@ -144,7 +181,7 @@ fn invalid_config_mode_in_json_emits_valid_json_error_document() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["schema_version"], 2);
+    assert_eq!(json["schema_version"], 3);
     assert!(json["diagnostics"][0]["message"]
         .as_str()
         .unwrap()
@@ -233,7 +270,7 @@ fn debug_candidates_includes_suppressed_alternatives() {
 
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["schema_version"], 2);
+    assert_eq!(json["schema_version"], 3);
     assert!(json["candidates"]
         .as_array()
         .unwrap()
