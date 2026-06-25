@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use cull_core::{
     BindingId, DefId, DefinitionEffectKind, DefinitionKind, DefinitionRole, Diagnostic,
     InternalCandidateDisposition, InternalCandidateInput, InternalCandidateReason,
-    InternalCandidateRule, LookupSemantics, ReferenceBindingState, ReferenceId, ReferencePhase,
-    ReferenceRole, RemovalRisk, ResidualLookup, SemanticGraphBuilder, UnresolvedReason,
+    InternalCandidateRule, LookupSemantics, ModuleId, ReferenceBindingState, ReferenceFact,
+    ReferenceId, ReferencePhase, ReferenceRole, RemovalRisk, ResidualLookup, SemanticDefinition,
+    SemanticGraphBuilder, UnresolvedReason,
 };
 
 pub(crate) fn finalize_definition_effects(
@@ -17,60 +18,95 @@ pub(crate) fn finalize_definition_effects(
 }
 
 fn derive_definition_effects(builder: &mut SemanticGraphBuilder) {
-    let graph = builder.graph().clone();
-    for definition in &graph.definitions {
-        let mut effects = BTreeSet::new();
-        for reference in graph
-            .references
-            .iter()
-            .filter(|reference| reference.module == definition.module)
-            .filter(|reference| reference_belongs_to_definition(reference, definition, &graph))
-        {
-            match reference.role {
-                ReferenceRole::Decorator => {
-                    effects.insert(DefinitionEffectKind::DecoratorApplication);
-                }
-                ReferenceRole::DefaultValue => {
-                    effects.insert(DefinitionEffectKind::DefaultExpressionEvaluation);
-                }
-                ReferenceRole::Annotation if reference.phase == ReferencePhase::DefinitionTime => {
-                    effects.insert(DefinitionEffectKind::EagerAnnotationEvaluation);
-                }
-                ReferenceRole::Annotation if reference.phase == ReferencePhase::LazyAnnotation => {
-                    effects.insert(DefinitionEffectKind::LazyAnnotationIntrospectionRisk);
-                }
-                ReferenceRole::BaseClass => {
-                    effects.insert(DefinitionEffectKind::ClassBaseEvaluation);
-                }
-                ReferenceRole::ClassKeyword => {
-                    effects.insert(DefinitionEffectKind::ClassKeywordEvaluation);
-                }
-                ReferenceRole::Metaclass => {
-                    effects.insert(DefinitionEffectKind::MetaclassEvaluation);
-                }
-                _ => {}
-            }
-        }
-        if definition.kind == DefinitionKind::Class {
-            effects.insert(DefinitionEffectKind::ClassBodyExecution);
+    let updates = {
+        let graph = builder.graph();
+        let mut references_by_module: BTreeMap<ModuleId, Vec<&ReferenceFact>> = BTreeMap::new();
+        for reference in &graph.references {
+            references_by_module
+                .entry(reference.module)
+                .or_default()
+                .push(reference);
         }
 
-        let effects = effects.into_iter().collect::<Vec<_>>();
-        let removal_risk = if effects.is_empty() {
-            RemovalRisk::NoKnownDefinitionEffects
-        } else {
-            let effect_set = builder.intern_definition_effect_set(effects.clone());
-            RemovalRisk::Review(effect_set)
-        };
+        let mut definitions_by_module: BTreeMap<ModuleId, Vec<&SemanticDefinition>> =
+            BTreeMap::new();
+        for definition in &graph.definitions {
+            definitions_by_module
+                .entry(definition.module)
+                .or_default()
+                .push(definition);
+        }
+
+        let mut updates = Vec::with_capacity(graph.definitions.len());
+        for definition in &graph.definitions {
+            let mut effects = BTreeSet::new();
+            let module_definitions = definitions_by_module
+                .get(&definition.module)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            for reference in references_by_module
+                .get(&definition.module)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .copied()
+                .filter(|reference| {
+                    reference_belongs_to_definition(reference, definition, module_definitions)
+                })
+            {
+                match reference.role {
+                    ReferenceRole::Decorator => {
+                        effects.insert(DefinitionEffectKind::DecoratorApplication);
+                    }
+                    ReferenceRole::DefaultValue => {
+                        effects.insert(DefinitionEffectKind::DefaultExpressionEvaluation);
+                    }
+                    ReferenceRole::Annotation
+                        if reference.phase == ReferencePhase::DefinitionTime =>
+                    {
+                        effects.insert(DefinitionEffectKind::EagerAnnotationEvaluation);
+                    }
+                    ReferenceRole::Annotation
+                        if reference.phase == ReferencePhase::LazyAnnotation =>
+                    {
+                        effects.insert(DefinitionEffectKind::LazyAnnotationIntrospectionRisk);
+                    }
+                    ReferenceRole::BaseClass => {
+                        effects.insert(DefinitionEffectKind::ClassBaseEvaluation);
+                    }
+                    ReferenceRole::ClassKeyword => {
+                        effects.insert(DefinitionEffectKind::ClassKeywordEvaluation);
+                    }
+                    ReferenceRole::Metaclass => {
+                        effects.insert(DefinitionEffectKind::MetaclassEvaluation);
+                    }
+                    _ => {}
+                }
+            }
+            if definition.kind == DefinitionKind::Class {
+                effects.insert(DefinitionEffectKind::ClassBodyExecution);
+            }
+            updates.push((definition.id, effects.into_iter().collect::<Vec<_>>()));
+        }
+        updates
+    };
+
+    for (definition, effects) in updates {
+        let has_effects = !effects.is_empty();
         let effect_set = builder.intern_definition_effect_set(effects);
-        builder.set_definition_effects(definition.id, effect_set, removal_risk);
+        let removal_risk = if has_effects {
+            RemovalRisk::Review(effect_set)
+        } else {
+            RemovalRisk::NoKnownDefinitionEffects
+        };
+        builder.set_definition_effects(definition, effect_set, removal_risk);
     }
 }
 
 fn reference_belongs_to_definition(
-    reference: &cull_core::ReferenceFact,
-    definition: &cull_core::SemanticDefinition,
-    graph: &cull_core::SemanticGraph,
+    reference: &ReferenceFact,
+    definition: &SemanticDefinition,
+    module_definitions: &[&SemanticDefinition],
 ) -> bool {
     if reference.span.start >= definition.range.start && reference.span.end <= definition.range.end
     {
@@ -86,9 +122,8 @@ fn reference_belongs_to_definition(
     {
         return false;
     }
-    !graph.definitions.iter().any(|other| {
-        other.module == definition.module
-            && other.id != definition.id
+    !module_definitions.iter().any(|other| {
+        other.id != definition.id
             && other.name_range.start > reference.span.end
             && other.name_range.start < definition.name_range.start
     })
@@ -189,59 +224,65 @@ fn warn_missing_overload_implementation(
 }
 
 fn build_internal_candidates(builder: &mut SemanticGraphBuilder) {
-    let graph = builder.graph().clone();
-    let mut inbound_by_binding: BTreeMap<BindingId, BTreeSet<ReferenceId>> = BTreeMap::new();
-    let mut unsupported_by_binding: BTreeMap<BindingId, BTreeSet<ReferenceId>> = BTreeMap::new();
-    let binding_sets = graph
-        .binding_sets
-        .iter()
-        .map(|set| (set.id, set.bindings.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let flow_uncertainty_sets = graph
-        .flow_uncertainty_sets
-        .iter()
-        .map(|set| (set.id, set.uncertainties.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let bindings_by_symbol = graph.bindings.iter().fold(
-        BTreeMap::<cull_core::SymbolId, Vec<BindingId>>::new(),
-        |mut by_symbol, binding| {
-            by_symbol
-                .entry(binding.symbol)
-                .or_default()
-                .push(binding.id);
-            by_symbol
-        },
-    );
-    let modules_with_unsupported_annotations = graph
-        .references
-        .iter()
-        .filter(|reference| {
-            reference.role == ReferenceRole::Annotation
-                && matches!(
-                    reference.lexical_target,
-                    cull_core::Resolution::Unresolved(UnresolvedReason::UnsupportedAnnotation)
-                )
-        })
-        .map(|reference| reference.module)
-        .collect::<BTreeSet<_>>();
+    let inputs = {
+        let graph = builder.graph();
+        let mut inbound_by_binding: BTreeMap<BindingId, BTreeSet<ReferenceId>> = BTreeMap::new();
+        let mut unsupported_by_binding: BTreeMap<BindingId, BTreeSet<ReferenceId>> =
+            BTreeMap::new();
 
-    for reference in &graph.references {
-        match &reference.binding_state {
-            ReferenceBindingState::Analyzed(state) => {
-                let Some(bindings) = binding_sets.get(&state.bindings) else {
-                    continue;
-                };
-                for binding in bindings {
-                    inbound_by_binding
-                        .entry(*binding)
-                        .or_default()
-                        .insert(reference.id);
+        let mut binding_sets: Vec<&[BindingId]> = vec![&[]; graph.binding_sets.len()];
+        for set in &graph.binding_sets {
+            binding_sets[set.id.as_u32() as usize] = set.bindings.as_slice();
+        }
+        let mut flow_uncertainty_sets: Vec<&[cull_core::FlowUncertaintyKind]> =
+            vec![&[]; graph.flow_uncertainty_sets.len()];
+        for set in &graph.flow_uncertainty_sets {
+            flow_uncertainty_sets[set.id.as_u32() as usize] = set.uncertainties.as_slice();
+        }
+
+        let mut bindings_by_symbol = vec![Vec::new(); graph.symbols.len()];
+        for binding in &graph.bindings {
+            bindings_by_symbol[binding.symbol.as_u32() as usize].push(binding.id);
+        }
+        let modules_with_unsupported_annotations = graph
+            .references
+            .iter()
+            .filter(|reference| {
+                reference.role == ReferenceRole::Annotation
+                    && matches!(
+                        reference.lexical_target,
+                        cull_core::Resolution::Unresolved(UnresolvedReason::UnsupportedAnnotation)
+                    )
+            })
+            .map(|reference| reference.module)
+            .collect::<BTreeSet<_>>();
+
+        for reference in &graph.references {
+            match &reference.binding_state {
+                ReferenceBindingState::Analyzed(state) => {
+                    let bindings = binding_sets
+                        .get(state.bindings.as_u32() as usize)
+                        .copied()
+                        .unwrap_or_default();
+                    for binding in bindings {
+                        inbound_by_binding
+                            .entry(*binding)
+                            .or_default()
+                            .insert(reference.id);
+                    }
+                    if state.residual != ResidualLookup::None
+                        || flow_uncertainty_sets
+                            .get(state.uncertainty.as_u32() as usize)
+                            .is_some_and(|uncertainties| !uncertainties.is_empty())
+                    {
+                        mark_unsupported_reference(
+                            reference,
+                            &bindings_by_symbol,
+                            &mut unsupported_by_binding,
+                        );
+                    }
                 }
-                if state.residual != ResidualLookup::None
-                    || flow_uncertainty_sets
-                        .get(&state.uncertainty)
-                        .is_some_and(|uncertainties| !uncertainties.is_empty())
-                {
+                ReferenceBindingState::NotAnalyzed(_) | ReferenceBindingState::NotApplicable => {
                     mark_unsupported_reference(
                         reference,
                         &bindings_by_symbol,
@@ -249,88 +290,88 @@ fn build_internal_candidates(builder: &mut SemanticGraphBuilder) {
                     );
                 }
             }
-            ReferenceBindingState::NotAnalyzed(_) | ReferenceBindingState::NotApplicable => {
-                mark_unsupported_reference(
-                    reference,
-                    &bindings_by_symbol,
-                    &mut unsupported_by_binding,
-                );
-            }
         }
-    }
 
-    for definition in &graph.definitions {
-        let Some(rule) = candidate_rule(definition.kind) else {
-            continue;
-        };
-        let known_inbound = inbound_by_binding
-            .get(&definition.binding)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let unsupported_inbound = unsupported_by_binding
-            .get(&definition.binding)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let inbound = known_inbound
-            .iter()
-            .chain(unsupported_inbound.iter())
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let has_module_unsupported_annotation =
-            modules_with_unsupported_annotations.contains(&definition.module);
-        let mut reasons = BTreeSet::new();
-        let disposition = if definition.role == DefinitionRole::OverloadDeclaration {
-            reasons.insert(InternalCandidateReason::OverloadDeclaration);
-            InternalCandidateDisposition::Suppressed
-        } else if !definition.reportable {
-            reasons.insert(InternalCandidateReason::NonReportableDefinition);
-            InternalCandidateDisposition::Suppressed
-        } else if known_inbound.is_empty()
-            && unsupported_inbound.is_empty()
-            && !has_module_unsupported_annotation
-        {
-            reasons.insert(InternalCandidateReason::NoSameModuleReferences);
-            reasons.insert(InternalCandidateReason::CrossModuleAnalysisDeferred);
-            InternalCandidateDisposition::Candidate
-        } else {
-            if !known_inbound.is_empty() {
-                reasons.insert(InternalCandidateReason::HasSameModuleReferences);
-            }
-            if !unsupported_inbound.is_empty() {
-                reasons.insert(InternalCandidateReason::UnresolvedOrUnsupportedReference);
-            }
-            if has_module_unsupported_annotation {
-                reasons.insert(InternalCandidateReason::UnresolvedOrUnsupportedReference);
-            }
-            InternalCandidateDisposition::Suppressed
-        };
+        let mut inputs = Vec::new();
+        for definition in &graph.definitions {
+            let Some(rule) = candidate_rule(definition.kind) else {
+                continue;
+            };
+            let known_inbound = inbound_by_binding
+                .get(&definition.binding)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let unsupported_inbound = unsupported_by_binding
+                .get(&definition.binding)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let inbound = known_inbound
+                .iter()
+                .chain(unsupported_inbound.iter())
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let has_module_unsupported_annotation =
+                modules_with_unsupported_annotations.contains(&definition.module);
+            let mut reasons = BTreeSet::new();
+            let disposition = if definition.role == DefinitionRole::OverloadDeclaration {
+                reasons.insert(InternalCandidateReason::OverloadDeclaration);
+                InternalCandidateDisposition::Suppressed
+            } else if !definition.reportable {
+                reasons.insert(InternalCandidateReason::NonReportableDefinition);
+                InternalCandidateDisposition::Suppressed
+            } else if known_inbound.is_empty()
+                && unsupported_inbound.is_empty()
+                && !has_module_unsupported_annotation
+            {
+                reasons.insert(InternalCandidateReason::NoSameModuleReferences);
+                reasons.insert(InternalCandidateReason::CrossModuleAnalysisDeferred);
+                InternalCandidateDisposition::Candidate
+            } else {
+                if !known_inbound.is_empty() {
+                    reasons.insert(InternalCandidateReason::HasSameModuleReferences);
+                }
+                if !unsupported_inbound.is_empty() {
+                    reasons.insert(InternalCandidateReason::UnresolvedOrUnsupportedReference);
+                }
+                if has_module_unsupported_annotation {
+                    reasons.insert(InternalCandidateReason::UnresolvedOrUnsupportedReference);
+                }
+                InternalCandidateDisposition::Suppressed
+            };
 
-        builder.add_internal_candidate(InternalCandidateInput {
-            definition: definition.id,
-            rule,
-            disposition,
-            reasons: reasons.into_iter().collect(),
-            inbound_references: inbound,
-            removal_risk: definition.removal_risk.clone(),
-        });
+            inputs.push(InternalCandidateInput {
+                definition: definition.id,
+                rule,
+                disposition,
+                reasons: reasons.into_iter().collect(),
+                inbound_references: inbound,
+                removal_risk: definition.removal_risk.clone(),
+            });
+        }
+        inputs
+    };
+
+    for input in inputs {
+        builder.add_internal_candidate(input);
     }
 }
 
 fn mark_unsupported_reference(
     reference: &cull_core::ReferenceFact,
-    bindings_by_symbol: &BTreeMap<cull_core::SymbolId, Vec<BindingId>>,
+    bindings_by_symbol: &[Vec<BindingId>],
     unsupported_by_binding: &mut BTreeMap<BindingId, BTreeSet<ReferenceId>>,
 ) {
     for symbol in candidate_symbols_for_reference(reference) {
-        let Some(bindings) = bindings_by_symbol.get(&symbol) else {
-            continue;
-        };
+        let bindings = bindings_by_symbol
+            .get(symbol.as_u32() as usize)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         for binding in bindings {
             unsupported_by_binding
                 .entry(*binding)

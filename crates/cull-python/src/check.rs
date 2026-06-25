@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use crate::{
     analysis::{ParsedProjectModule, SemanticProjectData},
@@ -185,72 +188,106 @@ pub(crate) fn analyze_project(
 }
 
 struct ProjectFacts<'a> {
-    modules: BTreeMap<ModuleId, &'a ParsedProjectModule>,
-    module_names: BTreeMap<ModuleId, String>,
-    module_scopes: BTreeMap<ModuleId, cull_core::ScopeId>,
-    module_contexts: BTreeMap<ModuleId, cull_core::ContextId>,
-    scopes: BTreeMap<ScopeId, &'a cull_core::ScopeFact>,
-    contexts: BTreeMap<ContextId, &'a cull_core::ContextFact>,
-    definitions_by_id: BTreeMap<DefId, &'a SemanticDefinition>,
-    definitions_by_binding: BTreeMap<BindingId, DefId>,
-    bindings: BTreeMap<BindingId, &'a BindingFact>,
-    bindings_by_symbol: BTreeMap<cull_core::SymbolId, Vec<BindingId>>,
+    modules: Vec<Option<&'a ParsedProjectModule>>,
+    module_names: Vec<Option<&'a str>>,
+    module_scopes: Vec<Option<cull_core::ScopeId>>,
+    module_contexts: Vec<Option<cull_core::ContextId>>,
+    scopes: Vec<Option<&'a cull_core::ScopeFact>>,
+    contexts: Vec<Option<&'a cull_core::ContextFact>>,
+    definitions_by_id: Vec<Option<&'a SemanticDefinition>>,
+    definitions_by_binding: Vec<Option<DefId>>,
+    bindings: Vec<Option<&'a BindingFact>>,
+    bindings_by_symbol: Vec<Vec<BindingId>>,
     bindings_by_module_name_range_kind: BTreeMap<(ModuleId, u32, u32, BindingKind), Vec<BindingId>>,
     references_by_module_range_name: BTreeMap<(ModuleId, u32, u32, String), &'a ReferenceFact>,
-    binding_sets: BTreeMap<cull_core::BindingSetId, Vec<BindingId>>,
-    flow_uncertainty_sets: BTreeMap<cull_core::FlowUncertaintySetId, Vec<FlowUncertaintyKind>>,
-    context_flow_statuses: BTreeMap<ContextId, &'a cull_core::ContextFlowStatusFact>,
-    effect_sets: BTreeMap<cull_core::DefinitionEffectSetId, Vec<DefinitionEffectKind>>,
+    module_all: Vec<Option<AllState>>,
+    binding_sets: Vec<&'a [BindingId]>,
+    flow_uncertainty_sets: Vec<&'a [FlowUncertaintyKind]>,
+    context_flow_statuses: Vec<Option<&'a cull_core::ContextFlowStatusFact>>,
+    effect_sets: Vec<&'a [DefinitionEffectKind]>,
 }
 
 impl<'a> ProjectFacts<'a> {
     fn new(graph: &'a SemanticGraph, parsed_modules: &'a [ParsedProjectModule]) -> Self {
-        let modules = parsed_modules
-            .iter()
-            .map(|module| (module.module.id, module))
-            .collect::<BTreeMap<_, _>>();
-        let module_names = graph
+        let module_len = graph
             .modules
             .iter()
-            .map(|module| (module.id, module.name.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let module_scopes = graph
-            .modules
-            .iter()
-            .map(|module| (module.id, module.scope))
-            .collect::<BTreeMap<_, _>>();
-        let module_contexts = graph
-            .modules
-            .iter()
-            .map(|module| (module.id, module.context))
-            .collect::<BTreeMap<_, _>>();
-        let scopes = graph
-            .scopes
-            .iter()
-            .map(|scope| (scope.id, scope))
-            .collect::<BTreeMap<_, _>>();
-        let contexts = graph
-            .contexts
-            .iter()
-            .map(|context| (context.id, context))
-            .collect::<BTreeMap<_, _>>();
-
-        let mut definitions_by_id = BTreeMap::new();
-        let mut definitions_by_binding = BTreeMap::new();
-        for definition in &graph.definitions {
-            definitions_by_id.insert(definition.id, definition);
-            definitions_by_binding.insert(definition.binding, definition.id);
+            .map(|module| module.id.as_u32() as usize)
+            .chain(
+                parsed_modules
+                    .iter()
+                    .map(|module| module.module.id.as_u32() as usize),
+            )
+            .max()
+            .map_or(0, |index| index + 1);
+        let mut modules = vec![None; module_len];
+        for module in parsed_modules {
+            modules[module.module.id.as_u32() as usize] = Some(module);
         }
 
-        let mut bindings = BTreeMap::new();
-        let mut bindings_by_symbol = BTreeMap::new();
+        let mut module_names = vec![None; module_len];
+        let mut module_scopes = vec![None; module_len];
+        let mut module_contexts = vec![None; module_len];
+        for module in &graph.modules {
+            let index = module.id.as_u32() as usize;
+            module_names[index] = Some(module.name.as_str());
+            module_scopes[index] = Some(module.scope);
+            module_contexts[index] = Some(module.context);
+        }
+
+        let scope_len = graph
+            .scopes
+            .iter()
+            .map(|scope| scope.id.as_u32() as usize)
+            .max()
+            .map_or(0, |index| index + 1);
+        let mut scopes = vec![None; scope_len];
+        for scope in &graph.scopes {
+            scopes[scope.id.as_u32() as usize] = Some(scope);
+        }
+
+        let context_len = graph
+            .contexts
+            .iter()
+            .map(|context| context.id.as_u32() as usize)
+            .max()
+            .map_or(0, |index| index + 1);
+        let mut contexts = vec![None; context_len];
+        for context in &graph.contexts {
+            contexts[context.id.as_u32() as usize] = Some(context);
+        }
+
+        let definition_len = graph
+            .definitions
+            .iter()
+            .map(|definition| definition.id.as_u32() as usize)
+            .max()
+            .map_or(0, |index| index + 1);
+        let binding_len = graph
+            .bindings
+            .iter()
+            .map(|binding| binding.id.as_u32() as usize)
+            .max()
+            .map_or(0, |index| index + 1);
+        let mut definitions_by_id = vec![None; definition_len];
+        let mut definitions_by_binding = vec![None; binding_len];
+        for definition in &graph.definitions {
+            definitions_by_id[definition.id.as_u32() as usize] = Some(definition);
+            definitions_by_binding[definition.binding.as_u32() as usize] = Some(definition.id);
+        }
+
+        let symbol_len = graph
+            .symbols
+            .iter()
+            .map(|symbol| symbol.id.as_u32() as usize)
+            .max()
+            .map_or(0, |index| index + 1);
+        let mut bindings = vec![None; binding_len];
+        let mut bindings_by_symbol = vec![Vec::new(); symbol_len];
         let mut bindings_by_module_name_range_kind = BTreeMap::new();
         for binding in &graph.bindings {
-            bindings.insert(binding.id, binding);
-            bindings_by_symbol
-                .entry(binding.symbol)
-                .or_insert_with(Vec::new)
-                .push(binding.id);
+            bindings[binding.id.as_u32() as usize] = Some(binding);
+            bindings_by_symbol[binding.symbol.as_u32() as usize].push(binding.id);
             bindings_by_module_name_range_kind
                 .entry((
                     binding.module,
@@ -277,27 +314,33 @@ impl<'a> ProjectFacts<'a> {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let binding_sets = graph
-            .binding_sets
-            .iter()
-            .map(|set| (set.id, set.bindings.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let flow_uncertainty_sets = graph
-            .flow_uncertainty_sets
-            .iter()
-            .map(|set| (set.id, set.uncertainties.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let context_flow_statuses = graph
-            .context_flow_statuses
-            .iter()
-            .map(|status| (status.context, status))
-            .collect::<BTreeMap<_, _>>();
 
-        let effect_sets = graph
-            .definition_effect_sets
-            .iter()
-            .map(|set| (set.id, set.effects.clone()))
-            .collect::<BTreeMap<_, _>>();
+        let mut module_all = vec![None; module_len];
+        for parsed in parsed_modules {
+            module_all[parsed.module.id.as_u32() as usize] = Some(module_all_state(&parsed.syntax));
+        }
+
+        let mut binding_sets: Vec<&'a [BindingId]> = vec![&[]; graph.binding_sets.len()];
+        for set in &graph.binding_sets {
+            binding_sets[set.id.as_u32() as usize] = set.bindings.as_slice();
+        }
+
+        let mut flow_uncertainty_sets: Vec<&'a [FlowUncertaintyKind]> =
+            vec![&[]; graph.flow_uncertainty_sets.len()];
+        for set in &graph.flow_uncertainty_sets {
+            flow_uncertainty_sets[set.id.as_u32() as usize] = set.uncertainties.as_slice();
+        }
+
+        let mut context_flow_statuses = vec![None; context_len];
+        for status in &graph.context_flow_statuses {
+            context_flow_statuses[status.context.as_u32() as usize] = Some(status);
+        }
+
+        let mut effect_sets: Vec<&'a [DefinitionEffectKind]> =
+            vec![&[]; graph.definition_effect_sets.len()];
+        for set in &graph.definition_effect_sets {
+            effect_sets[set.id.as_u32() as usize] = set.effects.as_slice();
+        }
 
         Self {
             modules,
@@ -312,6 +355,7 @@ impl<'a> ProjectFacts<'a> {
             bindings_by_symbol,
             bindings_by_module_name_range_kind,
             references_by_module_range_name,
+            module_all,
             binding_sets,
             flow_uncertainty_sets,
             context_flow_statuses,
@@ -338,54 +382,108 @@ impl<'a> ProjectFacts<'a> {
     }
 
     fn module_name(&self, module: ModuleId) -> String {
-        self.module_names
-            .get(&module)
-            .cloned()
+        self.module_name_ref(module)
+            .map(str::to_owned)
             .unwrap_or_else(|| format!("<module:{}>", module.as_u32()))
     }
 
+    fn module_name_ref(&self, module: ModuleId) -> Option<&'a str> {
+        self.module_names
+            .get(module.as_u32() as usize)
+            .copied()
+            .flatten()
+    }
+
     fn module_source(&self, module: ModuleId) -> Option<&'a ParsedProjectModule> {
-        self.modules.get(&module).copied()
+        self.modules
+            .get(module.as_u32() as usize)
+            .copied()
+            .flatten()
     }
 
     fn module_context(&self, module: ModuleId) -> Option<cull_core::ContextId> {
-        self.module_contexts.get(&module).copied()
+        self.module_contexts
+            .get(module.as_u32() as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn module_scope(&self, module: ModuleId) -> Option<cull_core::ScopeId> {
+        self.module_scopes
+            .get(module.as_u32() as usize)
+            .copied()
+            .flatten()
     }
 
     fn scope(&self, scope: ScopeId) -> Option<&'a cull_core::ScopeFact> {
-        self.scopes.get(&scope).copied()
+        self.scopes.get(scope.as_u32() as usize).copied().flatten()
     }
 
     fn context(&self, context: ContextId) -> Option<&'a cull_core::ContextFact> {
-        self.contexts.get(&context).copied()
+        self.contexts
+            .get(context.as_u32() as usize)
+            .copied()
+            .flatten()
     }
 
     fn context_status(&self, context: ContextId) -> Option<&'a ContextFlowStatus> {
         self.context_flow_statuses
-            .get(&context)
+            .get(context.as_u32() as usize)
+            .copied()
+            .flatten()
             .map(|status| &status.status)
     }
 
     fn binding(&self, binding: BindingId) -> Option<&'a BindingFact> {
-        self.bindings.get(&binding).copied()
+        self.bindings
+            .get(binding.as_u32() as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn bindings_for_symbol(&self, symbol: cull_core::SymbolId) -> &[BindingId] {
+        self.bindings_by_symbol
+            .get(symbol.as_u32() as usize)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn definition_for_binding(&self, binding: BindingId) -> Option<DefId> {
+        self.definitions_by_binding
+            .get(binding.as_u32() as usize)
+            .copied()
+            .flatten()
     }
 
     fn binding_set(&self, set: cull_core::BindingSetId) -> &[BindingId] {
         self.binding_sets
-            .get(&set)
-            .map(Vec::as_slice)
+            .get(set.as_u32() as usize)
+            .copied()
             .unwrap_or_default()
     }
 
     fn flow_uncertainties(&self, set: cull_core::FlowUncertaintySetId) -> &[FlowUncertaintyKind] {
         self.flow_uncertainty_sets
-            .get(&set)
-            .map(Vec::as_slice)
+            .get(set.as_u32() as usize)
+            .copied()
             .unwrap_or_default()
     }
 
     fn definition(&self, definition: DefId) -> Option<&'a SemanticDefinition> {
-        self.definitions_by_id.get(&definition).copied()
+        self.definitions_by_id
+            .get(definition.as_u32() as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn parsed_modules(&self) -> impl Iterator<Item = &'a ParsedProjectModule> + '_ {
+        self.modules.iter().filter_map(|module| *module)
+    }
+
+    fn module_all(&self, module: ModuleId) -> Option<&AllState> {
+        self.module_all
+            .get(module.as_u32() as usize)
+            .and_then(Option::as_ref)
     }
 
     fn definition_for_name_range(
@@ -395,7 +493,7 @@ impl<'a> ProjectFacts<'a> {
         kind: BindingKind,
     ) -> Option<DefId> {
         self.binding_for_alias(module, range, kind)
-            .and_then(|binding| self.definitions_by_binding.get(&binding).copied())
+            .and_then(|binding| self.definition_for_binding(binding))
     }
 }
 
@@ -423,11 +521,7 @@ impl BindingUseIndex {
                             if let cull_core::Resolution::Resolved(symbol) =
                                 reference.lexical_target
                             {
-                                if facts
-                                    .bindings_by_symbol
-                                    .get(&symbol)
-                                    .is_some_and(|bindings| !bindings.is_empty())
-                                {
+                                if !facts.bindings_for_symbol(symbol).is_empty() {
                                     ambiguous_names.insert((
                                         reference.source_scope,
                                         reference.semantic_name.clone(),
@@ -480,9 +574,10 @@ fn lexical_fallback_bindings(
     let cull_core::Resolution::Resolved(symbol) = reference.lexical_target else {
         return Vec::new();
     };
-    let Some(bindings) = facts.bindings_by_symbol.get(&symbol) else {
+    let bindings = facts.bindings_for_symbol(symbol);
+    if bindings.is_empty() {
         return Vec::new();
-    };
+    }
     bindings
         .iter()
         .filter_map(|binding| {
@@ -749,15 +844,11 @@ struct ExportReference {
     source_module: ModuleId,
 }
 
-#[derive(Clone)]
 struct ImportOperation {
     module: ModuleId,
-    range: TextRange,
     kind: ImportOperationKind,
-    phase: ReferencePhase,
 }
 
-#[derive(Clone)]
 enum ImportOperationKind {
     Import {
         requested: String,
@@ -776,36 +867,29 @@ enum ImportOperationKind {
     },
 }
 
-#[derive(Clone)]
 struct AssignmentOperation {
     module: ModuleId,
     binding: BindingId,
     value: Expr,
 }
 
-#[derive(Clone)]
 struct AttributeOperation {
     module: ModuleId,
     expression: ExprAttribute,
     kind: AttributeOperationKind,
-    phase: ReferencePhase,
 }
 
-#[derive(Clone)]
 struct DynamicImportOperation {
     module: ModuleId,
     call: ExprCall,
 }
 
-#[derive(Clone)]
 struct ReflectiveOperation {
     module: ModuleId,
     call: ExprCall,
     kind: ReflectiveOperationKind,
-    phase: ReferencePhase,
 }
 
-#[derive(Clone)]
 struct NamespaceMappingOperation {
     module: ModuleId,
     call: ExprCall,
@@ -852,6 +936,7 @@ struct ProjectResolver<'a, 'b> {
     star_imports: Vec<ImportOperation>,
     binding_values: BTreeMap<BindingId, ValueSet>,
     module_slots: BTreeMap<(ModuleId, String), ValueSet>,
+    module_resolution_cache: BTreeMap<String, LocalModuleResolution>,
     cross_references: Vec<CrossReference>,
     export_references: Vec<ExportReference>,
     module_uncertainty: BTreeMap<ModuleId, BTreeSet<Part2Uncertainty>>,
@@ -880,6 +965,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
             star_imports: Vec::new(),
             binding_values: BTreeMap::new(),
             module_slots: BTreeMap::new(),
+            module_resolution_cache: BTreeMap::new(),
             cross_references: Vec::new(),
             export_references: Vec::new(),
             module_uncertainty: BTreeMap::new(),
@@ -896,6 +982,16 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
             );
         }
         self.mark_circular_import_uncertainty();
+    }
+
+    fn resolve_absolute(&mut self, name: &str) -> LocalModuleResolution {
+        if let Some(resolution) = self.module_resolution_cache.get(name) {
+            return resolution.clone();
+        }
+        let resolution = self.namespace.resolve_absolute(name);
+        self.module_resolution_cache
+            .insert(name.to_owned(), resolution.clone());
+        resolution
     }
 
     fn seed_definition_slots(&mut self, module: ModuleId) {
@@ -915,8 +1011,8 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
     fn collect_statements(&mut self, module: ModuleId, statements: &[Stmt], phase: ReferencePhase) {
         for statement in statements {
             match statement {
-                Stmt::Import(import) => self.collect_import(module, import, phase),
-                Stmt::ImportFrom(import) => self.collect_import_from(module, import, phase),
+                Stmt::Import(import) => self.collect_import(module, import),
+                Stmt::ImportFrom(import) => self.collect_import_from(module, import),
                 Stmt::Assign(assign) => {
                     self.collect_assignment(module, assign);
                     self.collect_namespace_mapping_escape(
@@ -989,7 +1085,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         }
     }
 
-    fn collect_import(&mut self, module: ModuleId, import: &StmtImport, phase: ReferencePhase) {
+    fn collect_import(&mut self, module: ModuleId, import: &StmtImport) {
         for alias in &import.names {
             let name_range = alias
                 .asname
@@ -1002,34 +1098,25 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
             {
                 self.import_operations.push(ImportOperation {
                     module,
-                    range: to_range(alias.range),
                     kind: ImportOperationKind::Import {
                         requested: alias.name.id.to_string(),
                         binding,
                         asname: alias.asname.is_some(),
                     },
-                    phase,
                 });
             }
         }
     }
 
-    fn collect_import_from(
-        &mut self,
-        module: ModuleId,
-        import: &StmtImportFrom,
-        phase: ReferencePhase,
-    ) {
+    fn collect_import_from(&mut self, module: ModuleId, import: &StmtImportFrom) {
         for alias in &import.names {
             if alias.name.id.as_str() == "*" {
                 self.star_imports.push(ImportOperation {
                     module,
-                    range: to_range(alias.range),
                     kind: ImportOperationKind::StarImport {
                         module_name: import.module.as_ref().map(|module| module.id.to_string()),
                         level: import.level,
                     },
-                    phase,
                 });
                 continue;
             }
@@ -1044,14 +1131,12 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
             {
                 self.import_operations.push(ImportOperation {
                     module,
-                    range: to_range(alias.range),
                     kind: ImportOperationKind::ImportFrom {
                         module_name: import.module.as_ref().map(|module| module.id.to_string()),
                         level: import.level,
                         name: alias.name.id.to_string(),
                         binding,
                     },
-                    phase,
                 });
             }
         }
@@ -1117,7 +1202,6 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                     module,
                     expression: attribute.clone(),
                     kind,
-                    phase,
                 });
                 self.collect_expr_operations(module, &attribute.value, phase);
             }
@@ -1230,14 +1314,13 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                         module,
                         expression: attribute.clone(),
                         kind: AttributeOperationKind::Read,
-                        phase,
                     });
                 }
                 self.collect_expr_operations(module, &attribute.value, phase);
             }
             Expr::Call(call) => {
                 self.collect_dynamic_import_call(module, call, phase);
-                self.collect_reflective_call(module, call, phase);
+                self.collect_reflective_call(module, call);
                 self.collect_expr_operations(module, &call.func, phase);
                 collect_arguments(&call.arguments, |expr| {
                     self.collect_namespace_mapping_escape(
@@ -1334,12 +1417,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         });
     }
 
-    fn collect_reflective_call(
-        &mut self,
-        module: ModuleId,
-        call: &ExprCall,
-        phase: ReferencePhase,
-    ) {
+    fn collect_reflective_call(&mut self, module: ModuleId, call: &ExprCall) {
         let Some(kind) = self.reflective_call_kind(module, &call.func) else {
             return;
         };
@@ -1347,7 +1425,6 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
             module,
             call: call.clone(),
             kind,
-            phase,
         });
     }
 
@@ -1396,12 +1473,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
 
     fn mark_circular_import_uncertainty(&mut self) {
         let edges = self.local_import_edges();
-        let mut cycle_nodes = BTreeSet::new();
-        for start in edges.keys().copied() {
-            let mut path = vec![start];
-            self.collect_cycle_nodes(start, start, &edges, &mut path, &mut cycle_nodes);
-        }
-        for module in cycle_nodes {
+        for module in cyclic_import_nodes(&edges) {
             self.module_uncertainty
                 .entry(module)
                 .or_default()
@@ -1409,39 +1481,13 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         }
     }
 
-    fn collect_cycle_nodes(
-        &self,
-        start: ModuleId,
-        current: ModuleId,
-        edges: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
-        path: &mut Vec<ModuleId>,
-        cycle_nodes: &mut BTreeSet<ModuleId>,
-    ) {
-        let Some(targets) = edges.get(&current) else {
-            return;
-        };
-        for target in targets {
-            if *target == start {
-                cycle_nodes.extend(path.iter().copied());
-                cycle_nodes.insert(start);
-                continue;
-            }
-            if path.contains(target) {
-                continue;
-            }
-            path.push(*target);
-            self.collect_cycle_nodes(start, *target, edges, path, cycle_nodes);
-            path.pop();
-        }
-    }
-
     fn local_import_edges(&mut self) -> BTreeMap<ModuleId, BTreeSet<ModuleId>> {
         let mut edges: BTreeMap<ModuleId, BTreeSet<ModuleId>> = BTreeMap::new();
-        for operation in self.import_operations.clone() {
-            match operation.kind {
+        let import_operations = std::mem::take(&mut self.import_operations);
+        for operation in &import_operations {
+            match &operation.kind {
                 ImportOperationKind::Import { requested, .. } => {
-                    if let LocalModuleResolution::Module(target) =
-                        self.namespace.resolve_absolute(&requested)
+                    if let LocalModuleResolution::Module(target) = self.resolve_absolute(requested)
                     {
                         edges.entry(operation.module).or_default().insert(target);
                     }
@@ -1454,17 +1500,17 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                 } => {
                     if let Some(base_name) = self.namespace.relative_module_name(
                         operation.module,
-                        level,
+                        *level,
                         module_name.as_deref(),
                     ) {
                         if let LocalModuleResolution::Module(target) =
-                            self.namespace.resolve_absolute(&base_name)
+                            self.resolve_absolute(&base_name)
                         {
                             edges.entry(operation.module).or_default().insert(target);
                         }
                         let submodule = format!("{base_name}.{name}");
                         if let LocalModuleResolution::Module(target) =
-                            self.namespace.resolve_absolute(&submodule)
+                            self.resolve_absolute(&submodule)
                         {
                             edges.entry(operation.module).or_default().insert(target);
                         }
@@ -1473,54 +1519,72 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                 ImportOperationKind::StarImport { .. } => {}
             }
         }
-        for operation in self.star_imports.clone() {
-            if let ImportOperationKind::StarImport { module_name, level } = operation.kind {
+        self.import_operations = import_operations;
+
+        let star_imports = std::mem::take(&mut self.star_imports);
+        for operation in &star_imports {
+            if let ImportOperationKind::StarImport { module_name, level } = &operation.kind {
                 if let Some(imported_module_name) = self.namespace.relative_module_name(
                     operation.module,
-                    level,
+                    *level,
                     module_name.as_deref(),
                 ) {
                     if let LocalModuleResolution::Module(target) =
-                        self.namespace.resolve_absolute(&imported_module_name)
+                        self.resolve_absolute(&imported_module_name)
                     {
                         edges.entry(operation.module).or_default().insert(target);
                     }
                 }
             }
         }
+        self.star_imports = star_imports;
         edges
     }
 
     fn solve(&mut self) {
         let mut changed = true;
         let mut iterations = 0usize;
+        let import_operations = std::mem::take(&mut self.import_operations);
+        let assignment_operations = std::mem::take(&mut self.assignment_operations);
+        let dynamic_import_operations = std::mem::take(&mut self.dynamic_import_operations);
+        let reflective_operations = std::mem::take(&mut self.reflective_operations);
+        let namespace_mapping_operations = std::mem::take(&mut self.namespace_mapping_operations);
+        let attribute_operations = std::mem::take(&mut self.attribute_operations);
+        let star_imports = std::mem::take(&mut self.star_imports);
         while changed && iterations < 64 {
             iterations += 1;
             changed = false;
-            for operation in self.import_operations.clone() {
+            for operation in &import_operations {
                 changed |= self.apply_import_operation(operation);
             }
-            for assignment in self.assignment_operations.clone() {
+            for assignment in &assignment_operations {
                 let value = self.resolve_expr_value(assignment.module, &assignment.value);
                 changed |= self.record_binding_value(assignment.binding, value);
             }
-            for operation in self.dynamic_import_operations.clone() {
+            for operation in &dynamic_import_operations {
                 changed |= self.apply_dynamic_import_operation(operation);
             }
-            for operation in self.reflective_operations.clone() {
+            for operation in &reflective_operations {
                 changed |= self.apply_reflective_operation(operation);
             }
-            for operation in self.namespace_mapping_operations.clone() {
+            for operation in &namespace_mapping_operations {
                 changed |= self.apply_namespace_mapping_operation(operation);
             }
-            for operation in self.attribute_operations.clone() {
+            for operation in &attribute_operations {
                 changed |= self.apply_attribute_operation(operation);
             }
-            for star in self.star_imports.clone() {
+            for star in &star_imports {
                 changed |= self.apply_star_import(star);
             }
             changed |= self.apply_exports();
         }
+        self.import_operations = import_operations;
+        self.assignment_operations = assignment_operations;
+        self.dynamic_import_operations = dynamic_import_operations;
+        self.reflective_operations = reflective_operations;
+        self.namespace_mapping_operations = namespace_mapping_operations;
+        self.attribute_operations = attribute_operations;
+        self.star_imports = star_imports;
         if iterations >= 64 {
             for parsed in self.parsed_modules {
                 self.module_uncertainty
@@ -1531,36 +1595,27 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         }
     }
 
-    fn apply_import_operation(&mut self, operation: ImportOperation) -> bool {
-        let ImportOperation {
-            module,
-            range,
-            kind,
-            phase,
-        } = operation;
-        match kind {
+    fn apply_import_operation(&mut self, operation: &ImportOperation) -> bool {
+        let module = operation.module;
+        match &operation.kind {
             ImportOperationKind::Import {
                 requested,
                 binding,
                 asname,
             } => {
                 let mut changed = false;
-                let target_name = if asname {
-                    requested.clone()
+                let target_name = if *asname {
+                    requested.as_str()
                 } else {
-                    requested
-                        .split('.')
-                        .next()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| requested.clone())
+                    requested.split('.').next().unwrap_or(requested.as_str())
                 };
-                match self.namespace.resolve_absolute(&target_name) {
+                match self.resolve_absolute(target_name) {
                     LocalModuleResolution::Module(module) => {
-                        changed |= self.record_binding_value(binding, ValueSet::module(module));
+                        changed |= self.record_binding_value(*binding, ValueSet::module(module));
                     }
                     LocalModuleResolution::Namespace(_) => {
                         changed |= self.record_binding_value(
-                            binding,
+                            *binding,
                             ValueSet::default()
                                 .with_uncertainty(Part2Uncertainty::UnsupportedNamespace),
                         );
@@ -1571,20 +1626,19 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                         } else {
                             ValueSet::external(Part2Uncertainty::ExternalImport)
                         };
-                        changed |= self.record_binding_value(binding, value);
+                        changed |= self.record_binding_value(*binding, value);
                     }
                     LocalModuleResolution::Unsupported(_) => {
                         changed |= self.record_binding_value(
-                            binding,
+                            *binding,
                             ValueSet::default()
                                 .with_uncertainty(Part2Uncertainty::ImportResolution),
                         );
                     }
                 }
-                if let LocalModuleResolution::Module(full_module) =
-                    self.namespace.resolve_absolute(&requested)
+                if let LocalModuleResolution::Module(full_module) = self.resolve_absolute(requested)
                 {
-                    changed |= self.add_parent_package_attributes(&requested, full_module);
+                    changed |= self.add_parent_package_attributes(requested, full_module);
                 }
                 changed
             }
@@ -1594,8 +1648,8 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                 name,
                 binding,
             } => {
-                let target = self.resolve_import_from(module, module_name.as_deref(), level, &name);
-                let value = if level == 0
+                let target = self.resolve_import_from(module, module_name.as_deref(), *level, name);
+                let value = if *level == 0
                     && module_name.as_deref() == Some("importlib")
                     && name == "import_module"
                 {
@@ -1603,16 +1657,9 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                 } else {
                     target.clone()
                 };
-                let changed = self.record_binding_value(binding, value);
-                self.add_cross_references_from_value(
-                    target.clone(),
-                    FindingReferenceKind::Import,
-                    module,
-                    name.clone(),
-                    range,
-                    phase,
-                );
-                changed | self.record_package_reexport(module, binding, &name, target)
+                let changed = self.record_binding_value(*binding, value);
+                self.add_cross_references_from_value(target.clone(), module);
+                changed | self.record_package_reexport(module, *binding, name, target)
             }
             ImportOperationKind::StarImport { .. } => false,
         }
@@ -1631,14 +1678,13 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         if !is_package_module(&parsed.module) {
             return false;
         }
-        let Some(binding_fact) = self.facts.bindings.get(&binding) else {
+        let Some(binding_fact) = self.facts.binding(binding) else {
             return false;
         };
         if self
             .facts
-            .module_scopes
-            .get(&binding_fact.module)
-            .is_none_or(|scope| *scope != binding_fact.scope)
+            .module_scope(binding_fact.module)
+            .is_none_or(|scope| scope != binding_fact.scope)
         {
             return false;
         }
@@ -1650,7 +1696,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         self.record_exports_from_value(target, binding_fact.name.clone(), kind, module)
     }
 
-    fn apply_dynamic_import_operation(&mut self, operation: DynamicImportOperation) -> bool {
+    fn apply_dynamic_import_operation(&mut self, operation: &DynamicImportOperation) -> bool {
         if !self.is_dynamic_import_function(operation.module, &operation.call.func) {
             return false;
         }
@@ -1664,14 +1710,14 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         };
         let mut changed = false;
         for module in value.modules {
-            if let Some(name) = self.facts.module_names.get(&module).cloned() {
-                changed |= self.add_parent_package_attributes(&name, module);
+            if let Some(name) = self.facts.module_name_ref(module) {
+                changed |= self.add_parent_package_attributes(name, module);
             }
         }
         changed
     }
 
-    fn apply_reflective_operation(&mut self, operation: ReflectiveOperation) -> bool {
+    fn apply_reflective_operation(&mut self, operation: &ReflectiveOperation) -> bool {
         if self.reflective_builtin_is_shadowed(operation.module, &operation.call.func) {
             return false;
         }
@@ -1695,7 +1741,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         }
     }
 
-    fn apply_reflective_attribute_read(&mut self, operation: ReflectiveOperation) -> bool {
+    fn apply_reflective_attribute_read(&mut self, operation: &ReflectiveOperation) -> bool {
         let Some(receiver) = operation.call.arguments.args.first() else {
             return false;
         };
@@ -1720,19 +1766,12 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         }
         for module in base.modules {
             let value = self.resolve_module_attribute(ValueSet::module(module), &name);
-            self.add_cross_references_from_value(
-                value,
-                FindingReferenceKind::ModuleAttribute,
-                operation.module,
-                name.clone(),
-                to_range(operation.call.range),
-                operation.phase,
-            );
+            self.add_cross_references_from_value(value, operation.module);
         }
         changed
     }
 
-    fn apply_reflective_attribute_mutation(&mut self, operation: ReflectiveOperation) -> bool {
+    fn apply_reflective_attribute_mutation(&mut self, operation: &ReflectiveOperation) -> bool {
         let Some(receiver) = operation.call.arguments.args.first() else {
             return false;
         };
@@ -1745,7 +1784,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         self.add_dynamic_namespace_uncertainty(operation.module, base, uncertainty)
     }
 
-    fn apply_namespace_mapping_operation(&mut self, operation: NamespaceMappingOperation) -> bool {
+    fn apply_namespace_mapping_operation(&mut self, operation: &NamespaceMappingOperation) -> bool {
         if self.reflective_builtin_is_shadowed(operation.module, &operation.call.func) {
             return false;
         }
@@ -1800,12 +1839,11 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
             .entry(binding)
             .or_default()
             .union_with(value.clone());
-        if let Some(binding_fact) = self.facts.bindings.get(&binding) {
+        if let Some(binding_fact) = self.facts.binding(binding) {
             if self
                 .facts
-                .module_scopes
-                .get(&binding_fact.module)
-                .is_some_and(|scope| *scope == binding_fact.scope)
+                .module_scope(binding_fact.module)
+                .is_some_and(|scope| scope == binding_fact.scope)
             {
                 changed |= self
                     .module_slots
@@ -1817,21 +1855,14 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         changed
     }
 
-    fn apply_attribute_operation(&mut self, operation: AttributeOperation) -> bool {
+    fn apply_attribute_operation(&mut self, operation: &AttributeOperation) -> bool {
         let attr = operation.expression.attr.id.to_string();
         let base = self.resolve_expr_value(operation.module, &operation.expression.value);
         let mut changed = false;
         match operation.kind {
             AttributeOperationKind::Read => {
                 let value = self.resolve_module_attribute(base, &attr);
-                self.add_cross_references_from_value(
-                    value,
-                    FindingReferenceKind::ModuleAttribute,
-                    operation.module,
-                    attr,
-                    to_range(operation.expression.range),
-                    operation.phase,
-                );
+                self.add_cross_references_from_value(value, operation.module);
             }
             AttributeOperationKind::Write => {
                 let had_modules = !base.modules.is_empty();
@@ -1864,19 +1895,14 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         changed
     }
 
-    fn apply_star_import(&mut self, operation: ImportOperation) -> bool {
-        let ImportOperation {
-            module,
-            range,
-            kind,
-            phase,
-        } = operation;
-        let ImportOperationKind::StarImport { module_name, level } = kind else {
+    fn apply_star_import(&mut self, operation: &ImportOperation) -> bool {
+        let module = operation.module;
+        let ImportOperationKind::StarImport { module_name, level } = &operation.kind else {
             return false;
         };
         let Some(imported_module_name) =
             self.namespace
-                .relative_module_name(module, level, module_name.as_deref())
+                .relative_module_name(module, *level, module_name.as_deref())
         else {
             self.module_uncertainty
                 .entry(module)
@@ -1885,7 +1911,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
             return false;
         };
         let LocalModuleResolution::Module(imported_module) =
-            self.namespace.resolve_absolute(&imported_module_name)
+            self.resolve_absolute(&imported_module_name)
         else {
             self.module_uncertainty
                 .entry(module)
@@ -1901,14 +1927,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                 .entry((module, name.clone()))
                 .or_default()
                 .union_with(value.clone());
-            self.add_cross_references_from_value(
-                value,
-                FindingReferenceKind::Import,
-                module,
-                name,
-                range,
-                phase,
-            );
+            self.add_cross_references_from_value(value, module);
         }
         changed
     }
@@ -1917,18 +1936,20 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         let mut changed = false;
         for parsed in self.parsed_modules {
             let module = parsed.module.id;
-            let export_state = module_all_state(&parsed.syntax);
+            let Some(export_state) = self.facts.module_all(module) else {
+                continue;
+            };
             if export_state.uncertain {
                 self.module_uncertainty
                     .entry(module)
                     .or_default()
                     .insert(Part2Uncertainty::DynamicExport);
             }
-            for name in export_state.explicit_names {
-                let value = self.module_slot_value(module, &name);
+            for name in &export_state.explicit_names {
+                let value = self.module_slot_value(module, name);
                 changed |= self.record_exports_from_value(
                     value,
-                    name,
+                    name.clone(),
                     FindingExportKind::ExplicitAll,
                     module,
                 );
@@ -1987,14 +2008,14 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         else {
             return ValueSet::default().with_uncertainty(Part2Uncertainty::ImportResolution);
         };
-        match self.namespace.resolve_absolute(&base_name) {
+        match self.resolve_absolute(&base_name) {
             LocalModuleResolution::Module(module) => {
                 let value = self.module_slot_value(module, name);
                 if !value.is_empty() {
                     return value;
                 }
                 let submodule = format!("{base_name}.{name}");
-                match self.namespace.resolve_absolute(&submodule) {
+                match self.resolve_absolute(&submodule) {
                     LocalModuleResolution::Module(module) => {
                         self.add_parent_package_attributes(&submodule, module);
                         ValueSet::module(module)
@@ -2012,7 +2033,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
             }
             LocalModuleResolution::Namespace(namespace) => {
                 let submodule = format!("{namespace}.{name}");
-                match self.namespace.resolve_absolute(&submodule) {
+                match self.resolve_absolute(&submodule) {
                     LocalModuleResolution::Module(module) => ValueSet::module(module),
                     _ => {
                         ValueSet::default().with_uncertainty(Part2Uncertainty::UnsupportedNamespace)
@@ -2030,8 +2051,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         let Some((parent_name, attr)) = full_name.rsplit_once('.') else {
             return false;
         };
-        if let LocalModuleResolution::Module(parent) = self.namespace.resolve_absolute(parent_name)
-        {
+        if let LocalModuleResolution::Module(parent) = self.resolve_absolute(parent_name) {
             return self
                 .module_slots
                 .entry((parent, attr.to_owned()))
@@ -2061,8 +2081,10 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
     }
 
     fn export_surface(&self, module: ModuleId) -> Vec<(String, ValueSet)> {
-        if let Some(parsed) = self.facts.module_source(module) {
-            let state = module_all_state(&parsed.syntax);
+        if self.facts.module_source(module).is_some() {
+            let Some(state) = self.facts.module_all(module) else {
+                return Vec::new();
+            };
             if !state.explicit_names.is_empty() {
                 let mut surface = if state.implicit_possible {
                     self.public_module_slots(module)
@@ -2071,8 +2093,8 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                 } else {
                     BTreeMap::new()
                 };
-                for name in state.explicit_names {
-                    surface.insert(name.clone(), self.module_slot_value(module, &name));
+                for name in &state.explicit_names {
+                    surface.insert(name.clone(), self.module_slot_value(module, name));
                 }
                 return surface.into_iter().collect();
             }
@@ -2117,12 +2139,12 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
 
     fn resolve_reference_value(&self, reference: &ReferenceFact) -> ValueSet {
         let mut value = ValueSet::default();
-        for binding in reaching_bindings(self.graph, self.facts, reference) {
+        for binding in reaching_bindings(self.facts, reference).iter().copied() {
             if let Some(provenance) = self.binding_values.get(&binding) {
                 value.union_with(provenance.clone());
             }
-            if let Some(definition) = self.facts.definitions_by_binding.get(&binding) {
-                value.definitions.insert(*definition);
+            if let Some(definition) = self.facts.definition_for_binding(binding) {
+                value.definitions.insert(definition);
             }
         }
         value
@@ -2171,7 +2193,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         } else {
             module_name
         };
-        match self.namespace.resolve_absolute(&returned_name) {
+        match self.resolve_absolute(&returned_name) {
             LocalModuleResolution::Module(target) => {
                 self.add_parent_package_attributes(&returned_name, target);
                 Some(ValueSet::module(target))
@@ -2194,9 +2216,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                 && self
                     .facts
                     .reference_for_name(module, name)
-                    .is_none_or(|reference| {
-                        reaching_bindings(self.graph, self.facts, reference).is_empty()
-                    })
+                    .is_none_or(|reference| reaching_bindings(self.facts, reference).is_empty())
             {
                 return true;
             }
@@ -2205,15 +2225,7 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
             .importlib_import_module
     }
 
-    fn add_cross_references_from_value(
-        &mut self,
-        value: ValueSet,
-        _kind: FindingReferenceKind,
-        source_module: ModuleId,
-        _source: String,
-        _range: TextRange,
-        _phase: ReferencePhase,
-    ) {
+    fn add_cross_references_from_value(&mut self, value: ValueSet, source_module: ModuleId) {
         for definition in value.definitions {
             if !self
                 .cross_references
@@ -2235,6 +2247,92 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         let name = self.facts.module_name(module);
         self.namespace.module_for_name(&name) == Some(module)
     }
+}
+
+struct ImportCycleState<'a> {
+    edges: &'a BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+    next_index: usize,
+    stack: Vec<ModuleId>,
+    on_stack: BTreeSet<ModuleId>,
+    indices: BTreeMap<ModuleId, usize>,
+    lowlinks: BTreeMap<ModuleId, usize>,
+    cycle_nodes: BTreeSet<ModuleId>,
+}
+
+impl<'a> ImportCycleState<'a> {
+    fn new(edges: &'a BTreeMap<ModuleId, BTreeSet<ModuleId>>) -> Self {
+        Self {
+            edges,
+            next_index: 0,
+            stack: Vec::new(),
+            on_stack: BTreeSet::new(),
+            indices: BTreeMap::new(),
+            lowlinks: BTreeMap::new(),
+            cycle_nodes: BTreeSet::new(),
+        }
+    }
+
+    fn visit(&mut self, module: ModuleId) {
+        let index = self.next_index;
+        self.next_index += 1;
+        self.indices.insert(module, index);
+        self.lowlinks.insert(module, index);
+        self.stack.push(module);
+        self.on_stack.insert(module);
+
+        let targets = self
+            .edges
+            .get(&module)
+            .map(|targets| targets.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for target in targets {
+            if !self.indices.contains_key(&target) {
+                self.visit(target);
+                let target_lowlink = self.lowlinks[&target];
+                let module_lowlink = self.lowlinks.get_mut(&module).expect("visited module");
+                *module_lowlink = (*module_lowlink).min(target_lowlink);
+            } else if self.on_stack.contains(&target) {
+                let target_index = self.indices[&target];
+                let module_lowlink = self.lowlinks.get_mut(&module).expect("visited module");
+                *module_lowlink = (*module_lowlink).min(target_index);
+            }
+        }
+
+        if self.lowlinks[&module] != self.indices[&module] {
+            return;
+        }
+        let mut component = Vec::new();
+        while let Some(member) = self.stack.pop() {
+            self.on_stack.remove(&member);
+            component.push(member);
+            if member == module {
+                break;
+            }
+        }
+        let self_loop = self
+            .edges
+            .get(&module)
+            .is_some_and(|targets| targets.contains(&module));
+        if component.len() > 1 || self_loop {
+            self.cycle_nodes.extend(component);
+        }
+    }
+}
+
+fn cyclic_import_nodes(edges: &BTreeMap<ModuleId, BTreeSet<ModuleId>>) -> BTreeSet<ModuleId> {
+    let mut modules = BTreeSet::new();
+    for (module, targets) in edges {
+        modules.insert(*module);
+        modules.extend(targets.iter().copied());
+    }
+
+    let mut state = ImportCycleState::new(edges);
+    for module in modules {
+        if !state.indices.contains_key(&module) {
+            state.visit(module);
+        }
+    }
+    state.cycle_nodes
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -2634,7 +2732,7 @@ impl<'a, 'b, 'c> ReachabilityBuilder<'a, 'b, 'c> {
         for selector in &self.project.configured_roots {
             let root_id = RootId::new(self.roots.len() as u32);
             if selector.is_module_root() {
-                match self.resolver.namespace.resolve_absolute(&selector.module) {
+                match self.resolver.resolve_absolute(&selector.module) {
                     LocalModuleResolution::Module(module) => {
                         self.roots.push(RootOutput {
                             id: root_id,
@@ -3478,17 +3576,14 @@ impl<'a, 'b, 'c> ReachabilityBuilder<'a, 'b, 'c> {
 
     fn scan_import(&mut self, domain: ReachabilityDomain, _module: ModuleId, import: &StmtImport) {
         for alias in &import.names {
-            if let LocalModuleResolution::Module(target) = self
-                .resolver
-                .namespace
-                .resolve_absolute(alias.name.id.as_str())
+            if let LocalModuleResolution::Module(target) =
+                self.resolver.resolve_absolute(alias.name.id.as_str())
             {
                 self.mark_module(domain, target, ModuleExecutionMode::Imported);
                 continue;
             }
             if let Some(first) = alias.name.id.as_str().split('.').next() {
-                if let LocalModuleResolution::Module(target) =
-                    self.resolver.namespace.resolve_absolute(first)
+                if let LocalModuleResolution::Module(target) = self.resolver.resolve_absolute(first)
                 {
                     self.mark_module(domain, target, ModuleExecutionMode::Imported);
                 }
@@ -3509,9 +3604,7 @@ impl<'a, 'b, 'c> ReachabilityBuilder<'a, 'b, 'c> {
         ) else {
             return;
         };
-        if let LocalModuleResolution::Module(target) =
-            self.resolver.namespace.resolve_absolute(&base_name)
-        {
+        if let LocalModuleResolution::Module(target) = self.resolver.resolve_absolute(&base_name) {
             self.mark_module(domain, target, ModuleExecutionMode::Imported);
         }
         for alias in &import.names {
@@ -3520,7 +3613,7 @@ impl<'a, 'b, 'c> ReachabilityBuilder<'a, 'b, 'c> {
             }
             let submodule = format!("{base_name}.{}", alias.name.id);
             if let LocalModuleResolution::Module(target) =
-                self.resolver.namespace.resolve_absolute(&submodule)
+                self.resolver.resolve_absolute(&submodule)
             {
                 self.mark_module(domain, target, ModuleExecutionMode::Imported);
             }
@@ -3717,7 +3810,7 @@ impl<'a, 'b, 'c> ReachabilityBuilder<'a, 'b, 'c> {
 
     fn resolve_selector(&mut self, selector: &crate::config::RootSelector) -> Result<DefId, ()> {
         let LocalModuleResolution::Module(module) =
-            self.resolver.namespace.resolve_absolute(&selector.module)
+            self.resolver.resolve_absolute(&selector.module)
         else {
             return Err(());
         };
@@ -3741,8 +3834,7 @@ impl<'a, 'b, 'c> ReachabilityBuilder<'a, 'b, 'c> {
                         && candidate.name == *attr
                         && self
                             .facts
-                            .bindings
-                            .get(&candidate.binding)
+                            .binding(candidate.binding)
                             .is_some_and(|binding| binding.scope == definition_fact.scope)
                 }) {
                     next.insert(candidate.id);
@@ -4011,10 +4103,6 @@ fn build_findings(
     let unreachable_ranges = collect_unreachable_statement_ranges(parsed_modules, facts);
     let binding_use_index = BindingUseIndex::build(graph, facts);
     let import_metadata = import_binding_metadata(parsed_modules, facts);
-    let module_all = parsed_modules
-        .iter()
-        .map(|parsed| (parsed.module.id, module_all_state(&parsed.syntax)))
-        .collect::<BTreeMap<_, _>>();
     let dead_cluster_members = dead_cluster_members(graph, reachability, mode);
     let dynamic_class_construction =
         dynamic_class_construction_members(graph, facts, resolver, reachability);
@@ -4204,7 +4292,7 @@ fn build_findings(
         );
         let reachability_output =
             reachability_for_finding(definition, reachability, mode, finding_type);
-        let removal_risk = FindingRemovalRisk::from_semantic(&definition.removal_risk, &effects);
+        let removal_risk = FindingRemovalRisk::from_semantic(&definition.removal_risk, effects);
         let evidence = evidence_for(
             finding_type,
             &inbound_references,
@@ -4277,7 +4365,6 @@ fn build_findings(
         &unreachable_ranges,
         facts,
         resolver,
-        &module_all,
         mode,
         project_completeness,
         reachability.root_coverage,
@@ -4473,7 +4560,6 @@ fn build_unused_import_findings(
     unreachable_ranges: &[UnreachableStatementRange],
     facts: &ProjectFacts<'_>,
     resolver: &ProjectResolver<'_, '_>,
-    module_all: &BTreeMap<ModuleId, AllState>,
     mode: ProjectMode,
     project_completeness: &ProjectCompleteness,
     root_coverage: RootCoverage,
@@ -4497,7 +4583,7 @@ fn build_unused_import_findings(
         let Some(binding) = facts.binding(meta.binding) else {
             continue;
         };
-        let all_state = module_all.get(&meta.module);
+        let all_state = facts.module_all(meta.module);
         if all_state.is_some_and(|state| state.explicit_names.contains(&meta.bound_name)) {
             continue;
         }
@@ -5119,7 +5205,7 @@ fn valued_annotated_assignment_bindings(
     facts: &ProjectFacts<'_>,
 ) -> BTreeSet<BindingId> {
     let mut bindings = BTreeSet::new();
-    for module in facts.modules.values() {
+    for module in facts.parsed_modules() {
         collect_valued_annotated_bindings(
             module.module.id,
             &module.syntax.body,
@@ -5358,7 +5444,7 @@ fn build_unused_private_method_findings(
             root_coverage,
             FindingRemovalRisk::from_semantic(
                 &method.removal_risk,
-                &definition_effects(method, facts),
+                definition_effects(method, facts),
             ),
             vec![
                 "no may-execute private-method reference resolved to this method".to_owned(),
@@ -6210,9 +6296,9 @@ fn same_module_references<'a>(
 ) -> BTreeMap<DefId, Vec<&'a ReferenceFact>> {
     let mut refs: BTreeMap<DefId, Vec<&ReferenceFact>> = BTreeMap::new();
     for reference in &graph.references {
-        for binding in reaching_bindings(graph, facts, reference) {
-            if let Some(definition) = facts.definitions_by_binding.get(&binding) {
-                refs.entry(*definition).or_default().push(reference);
+        for binding in reaching_bindings(facts, reference).iter().copied() {
+            if let Some(definition) = facts.definition_for_binding(binding) {
+                refs.entry(definition).or_default().push(reference);
             }
         }
     }
@@ -6375,8 +6461,7 @@ fn class_methods_for<'a>(
         .filter(|definition| definition.module == class_def.module)
         .filter(|definition| {
             facts
-                .bindings
-                .get(&definition.binding)
+                .binding(definition.binding)
                 .is_some_and(|binding| binding.scope == class_def.scope)
         })
         .collect()
@@ -6540,38 +6625,28 @@ fn reachability_for_finding(
     }
 }
 
-fn reaching_bindings(
-    graph: &SemanticGraph,
-    facts: &ProjectFacts<'_>,
+fn reaching_bindings<'a>(
+    facts: &'a ProjectFacts<'_>,
     reference: &ReferenceFact,
-) -> Vec<BindingId> {
+) -> Cow<'a, [BindingId]> {
     let cull_core::ReferenceBindingState::Analyzed(state) = &reference.binding_state else {
-        return Vec::new();
+        return Cow::Borrowed(&[]);
     };
     if state.reachability == LocalReachability::Unreachable {
-        return Vec::new();
+        return Cow::Borrowed(&[]);
     }
-    let mut bindings = graph
-        .binding_sets
-        .iter()
-        .find(|set| set.id == state.bindings)
-        .map(|set| set.bindings.clone())
-        .unwrap_or_default();
-    if bindings.is_empty() {
-        if let cull_core::Resolution::Resolved(symbol) = reference.lexical_target {
-            bindings.extend(
-                facts
-                    .bindings_by_symbol
-                    .get(&symbol)
-                    .into_iter()
-                    .flatten()
-                    .copied(),
-            );
-        }
+    let exact_bindings = facts.binding_set(state.bindings);
+    if !exact_bindings.is_empty() {
+        return Cow::Borrowed(exact_bindings);
+    }
+
+    let mut bindings = Vec::new();
+    if let cull_core::Resolution::Resolved(symbol) = reference.lexical_target {
+        bindings.extend(facts.bindings_for_symbol(symbol).iter().copied());
     }
     bindings.sort();
     bindings.dedup();
-    bindings
+    Cow::Owned(bindings)
 }
 
 fn candidate_fingerprint(rule_id: FindingRule, subject: &FindingSubject) -> String {
@@ -6944,14 +7019,14 @@ fn explanation_for(
     explanation
 }
 
-fn definition_effects(
+fn definition_effects<'a>(
     definition: &SemanticDefinition,
-    facts: &ProjectFacts<'_>,
-) -> Vec<DefinitionEffectKind> {
+    facts: &ProjectFacts<'a>,
+) -> &'a [DefinitionEffectKind] {
     facts
         .effect_sets
-        .get(&definition.definition_effects)
-        .cloned()
+        .get(definition.definition_effects.as_u32() as usize)
+        .copied()
         .unwrap_or_default()
 }
 
