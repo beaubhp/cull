@@ -8,7 +8,7 @@ pub mod source;
 pub use diagnostic::{Diagnostic, DiagnosticSeverity};
 pub use ids::{
     BindingId, BindingSetId, ContextId, DefId, DefinitionEffectSetId, FileId, FlowUncertaintySetId,
-    InternalCandidateId, LoopId, ModuleId, OverloadGroupId, ReferenceId, ScopeId, SymbolId,
+    InternalCandidateId, LoopId, ModuleId, OverloadGroupId, ReferenceId, RootId, ScopeId, SymbolId,
 };
 pub use ir::{DefinitionIr, DefinitionKey, DefinitionKind, ModuleIr};
 pub use output::{
@@ -17,7 +17,8 @@ pub use output::{
     FindingConfidence, FindingDefinition, FindingExport, FindingExportKind, FindingModeEffect,
     FindingOriginSummary, FindingPhaseSummary, FindingReachability, FindingReachabilityStatus,
     FindingReference, FindingReferenceKind, FindingRemovalRisk, FindingRule, FindingType,
-    FindingUncertainty, FindingUncertaintyKind, ProjectMode, SourceRootOutput,
+    FindingUncertainty, FindingUncertaintyKind, ProjectMode, ReachabilityDomain, RootCoverage,
+    RootInvocation, RootKind, RootOutput, SourceRootOutput,
 };
 pub use semantic::{
     AnnotationEvaluation, AnnotationSemantics, BindingFact, BindingInput, BindingKind,

@@ -122,3 +122,34 @@ fn invalid_config_mode_exits_two() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid [tool.cull].mode"));
 }
+
+#[test]
+fn complete_root_validation_errors_exit_two_in_json() {
+    let temp = tempfile::tempdir().unwrap();
+    write_file(temp.path(), "src/pkg/__init__.py", "");
+    write_file(temp.path(), "src/pkg/app.py", "def main():\n    pass\n");
+    write_file(
+        temp.path(),
+        "pyproject.toml",
+        "[tool.cull]\nsrc = 'src'\nroot_coverage = 'complete'\nroots = ['pkg.missing:main']\n",
+    );
+
+    let output = cull()
+        .arg("check")
+        .arg(temp.path())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| {
+            diagnostic["severity"] == "error" && diagnostic["code"] == "CULL_P3001"
+        }));
+}

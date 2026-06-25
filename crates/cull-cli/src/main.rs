@@ -251,11 +251,7 @@ fn render_text_output(output: &CheckOutput) {
             finding.rule_id.code(),
             finding.rule_id.text_name()
         );
-        println!(
-            "{} `{}` has no resolved inbound references under Cull's static model.",
-            definition_label(finding.definition.kind),
-            finding.definition.name
-        );
+        println!("{}", finding_summary(finding));
         println!();
         println!("Confidence: high");
         println!();
@@ -273,6 +269,21 @@ fn definition_label(kind: DefinitionKind) -> &'static str {
     match kind {
         DefinitionKind::Function => "Function",
         DefinitionKind::Class => "Class",
+    }
+}
+
+fn finding_summary(finding: &cull_core::Finding) -> String {
+    match finding.finding_type {
+        cull_core::FindingType::Unreferenced => format!(
+            "{} `{}` has no resolved inbound references under Cull's static model.",
+            definition_label(finding.definition.kind),
+            finding.definition.name
+        ),
+        cull_core::FindingType::RootUnreachable => format!(
+            "{} `{}` has no runtime path from Cull's recognized roots.",
+            definition_label(finding.definition.kind),
+            finding.definition.name
+        ),
     }
 }
 

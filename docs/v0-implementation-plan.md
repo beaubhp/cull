@@ -571,10 +571,34 @@ Policy:
 | `Absent` | Disable `CULL003` and `CULL004`; unreferenced analysis still runs. |
 | `NotApplicable` | Library mode uses export and public-surface policy instead. |
 
+User configuration accepts only:
+
+```toml
+[tool.cull]
+root_coverage = "complete" # or "partial"
+```
+
+`Absent` and `NotApplicable` are derived states, not accepted configuration values. In library
+mode, root coverage is `NotApplicable`. When no production roots resolve, root coverage is `Absent`.
+When production roots resolve without an explicit complete-root assertion, root coverage is
+`Partial`.
+
 `Complete` is narrow. Auto-discovered scripts and main guards do not prove all application roots are
 known. A project reaches `Complete` only when the user explicitly asserts that configured roots are
 complete, or when Cull has an equally strong closed-world condition. Otherwise root coverage remains
 `Partial`.
+
+If the user asserts `root_coverage = "complete"`, Cull must fail closed when it cannot validate the
+declared production root set. Static `[project.scripts]` and `[project.gui-scripts]` metadata follows
+the PyPA shape: each table maps command names to object references. Schema-invalid metadata is an
+input error, while metadata declared dynamic is unavailable root information.
+
+| Condition | Behavior |
+|---|---|
+| Invalid TOML, wrong table/value type, malformed script metadata, or malformed object reference | Exit `2` always. |
+| `scripts`/`gui-scripts` declared dynamic and unavailable statically | `Partial`; exit `2` if coverage asserted `complete`. |
+| Valid target unresolved or dynamic locally | `Partial`; exit `2` if coverage asserted `complete`. |
+| Valid resolved target | Add root normally. |
 
 ### Mode Policy
 
@@ -586,6 +610,12 @@ heuristics.
 | `auto` | Private top-level definitions may be high confidence. Public top-level definitions and exported definitions are at most `Review`. |
 | `application` | Public and private top-level definitions may be high confidence when evidence supports it. |
 | `library` | Exported and public top-level definitions are conservative. Private top-level definitions are analyzed normally. |
+
+Part 3 keeps `Production`, `Test`, and `ExternalSurface` reachability isolated. Auto mode may use
+external-surface reachability to protect public APIs and the private helpers they reach, but
+high-confidence `CULL003` and `CULL004` findings in auto mode require complete production roots.
+Library mode derives `RootCoverage::NotApplicable`; a statically complete, uncertainty-free
+external surface may justify private unreachable findings in library mode.
 
 The CLI may override configuration, for example `cull check . --mode application`.
 
@@ -612,6 +642,15 @@ Default policy:
 - test roots do not establish production reachability
 - candidates reachable only from tests say so in evidence
 - a dedicated test profile may include test roots
+
+Configured nested roots use `module:object.attr` resolution. Every segment must resolve to exactly
+one local static binding or Cull exits with code `2`; configured roots are user assertions and Cull
+does not guess through dynamic module or class attribute behavior.
+
+Direct class construction activates statically resolved metaclass `__call__` and/or ordinary
+`__new__`/`__init__` construction paths. It does not activate every method. If custom class
+construction cannot be resolved locally, Cull attaches localized uncertainty instead of making a
+high-confidence unreachable claim.
 
 ### Partial Analysis Policy
 
@@ -1440,6 +1479,13 @@ def old_helper():
 
 When neither definition is reachable from a recognized root, both are root-unreachable.
 `old_helper` is not unreferenced because `old_entry` references it.
+
+Dead-cluster classification overrides the simple unreferenced-first priority for nontrivial
+runtime-dead components. A dead cluster is a weakly connected component of the unreachable
+runtime-capable subgraph after projecting through non-reportable execution contexts. Isolated
+definitions with no inbound references remain `CULL001`/`CULL002`. Nontrivial unreachable weak
+components and reportable self-cycles emit `CULL003`/`CULL004` for their reportable top-level
+members, with any unreferenced entry condition recorded as secondary evidence.
 
 Additional fixtures:
 

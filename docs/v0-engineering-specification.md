@@ -108,6 +108,12 @@ library semantics.
 Application mode is an explicit closed-world policy for executable application code. Public and
 private top-level definitions may be high-confidence findings when static evidence supports it.
 
+Part 3 maintains isolated `Production`, `Test`, and `ExternalSurface` reachability. Auto mode may
+use external-surface reachability to protect public APIs and the private helpers they reach, but
+high-confidence `CULL003` and `CULL004` findings in auto mode require complete production roots.
+Library mode derives `RootCoverage::NotApplicable`; a statically complete, uncertainty-free
+external surface may justify private unreachable findings in library mode.
+
 Recognized roots in v0 are:
 
 | Root Source | Scope |
@@ -120,6 +126,36 @@ Recognized roots in v0 are:
 
 Cull traverses top-level executable references in recognized root modules. It does not mark every
 definition in those modules as reachable merely because the module is a root.
+
+Root coverage is configured only with `root_coverage = "complete"` or
+`root_coverage = "partial"` under `[tool.cull]`. `Absent` and `NotApplicable` are derived states:
+library mode derives `NotApplicable`, projects with no resolved production roots derive `Absent`,
+and projects with resolved roots but no explicit complete-root assertion derive `Partial`.
+
+Static `[project.scripts]` and `[project.gui-scripts]` metadata must be tables mapping command names
+to object references. Schema-invalid metadata is an input error, while metadata declared dynamic is
+unavailable root information.
+
+| Condition | Behavior |
+|---|---|
+| Invalid TOML, wrong table/value type, malformed script metadata, or malformed object reference | Exit `2` always. |
+| `scripts`/`gui-scripts` declared dynamic and unavailable statically | `Partial`; exit `2` if coverage asserted `complete`. |
+| Valid target unresolved or dynamic locally | `Partial`; exit `2` if coverage asserted `complete`. |
+| Valid resolved target | Add root normally. |
+
+When `root_coverage = "complete"` is asserted, any unresolved configured root, ambiguous configured
+attribute chain, malformed or unsupported declared root, local script target uncertainty, or
+reachability budget failure that prevents validating the declared root set is an exit-code `2`
+failure.
+
+Configured nested roots use `module:object.attr` resolution. Every segment must resolve to exactly
+one local static binding or Cull exits with code `2`; configured roots are user assertions and Cull
+does not guess through dynamic module or class attribute behavior.
+
+Direct class construction activates statically resolved metaclass `__call__` and/or ordinary
+`__new__`/`__init__` construction paths. It does not activate every method. If custom class
+construction cannot be resolved locally, Cull attaches localized uncertainty instead of making a
+high-confidence unreachable claim.
 
 ### Library Mode
 
@@ -397,6 +433,12 @@ Recommended priority:
 1. Unreferenced, when there are no inbound references.
 2. Root-unreachable, when inbound references exist but no runtime path exists from roots.
 
+Dead clusters are the explicit exception to the simple priority. A dead cluster is a weakly connected
+component of the unreachable runtime-capable subgraph after projecting through non-reportable
+execution contexts. Isolated unreferenced definitions keep `CULL001`/`CULL002`. Nontrivial
+unreachable weak components and reportable self-cycles emit `CULL003`/`CULL004` for reportable
+top-level members, with unreferenced entry conditions recorded as secondary evidence.
+
 ## Confidence Labels
 
 Cull v0 uses categorical labels, not numeric scores.
@@ -511,6 +553,7 @@ mode = "auto"
 src = ["src"]
 tests = ["tests"]
 exclude = ["migrations"]
+root_coverage = "partial"
 
 roots = [
   "acme.cli:main",

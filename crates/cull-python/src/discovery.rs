@@ -13,7 +13,10 @@ use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::{
-    config::{load_project_config, ConfigError, SourceRootKind},
+    config::{
+        load_project_config, ConfigError, ProjectScript, RootCoverageAssertion, RootSelector,
+        SourceRootKind,
+    },
     paths::{relative_slash_path, slash_path},
 };
 
@@ -48,6 +51,12 @@ pub struct DiscoveredProject {
     pub mode: ProjectMode,
     pub source_roots: Vec<SourceRoot>,
     pub modules: Vec<DiscoveredModule>,
+    pub configured_roots: Vec<RootSelector>,
+    pub root_coverage: Option<RootCoverageAssertion>,
+    pub scripts: Vec<ProjectScript>,
+    pub gui_scripts: Vec<ProjectScript>,
+    pub dynamic_scripts: bool,
+    pub dynamic_gui_scripts: bool,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -180,6 +189,12 @@ pub fn discover_project(options: DiscoveryOptions) -> Result<DiscoveredProject, 
         mode: config.mode,
         source_roots,
         modules,
+        configured_roots: config.roots,
+        root_coverage: config.root_coverage,
+        scripts: config.scripts,
+        gui_scripts: config.gui_scripts,
+        dynamic_scripts: config.dynamic_scripts,
+        dynamic_gui_scripts: config.dynamic_gui_scripts,
         diagnostics,
     })
 }

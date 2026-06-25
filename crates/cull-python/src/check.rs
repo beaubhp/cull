@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     analysis::{ParsedProjectModule, SemanticProjectData},
+    discovery::DiscoveredProject,
     module_namespace::{
         has_module_getattr, is_package_module, LocalModuleResolution, ModuleNamespaceIndex,
     },
@@ -13,12 +14,13 @@ use cull_core::{
     FindingDefinition, FindingExportKind, FindingModeEffect, FindingOriginSummary,
     FindingReachability, FindingReachabilityStatus, FindingReferenceKind, FindingRemovalRisk,
     FindingRule, FindingType, FindingUncertainty, FindingUncertaintyKind, LocalReachability,
-    ModuleId, ProjectMode, ReferenceFact, ReferencePhase, RemovalRisk, SemanticDefinition,
+    ModuleId, OriginDomain, ProjectMode, ReachabilityDomain, ReferenceFact, ReferencePhase,
+    RemovalRisk, RootCoverage, RootId, RootInvocation, RootKind, RootOutput, SemanticDefinition,
     SemanticGraph, TextRange,
 };
 use ruff_python_ast::{
-    Arguments, Expr, ExprAttribute, ExprCall, ExprContext, ExprName, ModModule, Stmt, StmtAssign,
-    StmtAugAssign, StmtDelete, StmtImport, StmtImportFrom,
+    Arguments, CmpOp, Expr, ExprAttribute, ExprCall, ExprContext, ExprName, ModModule, Stmt,
+    StmtAssign, StmtAugAssign, StmtDelete, StmtImport, StmtImportFrom,
 };
 
 pub(crate) fn analyze_part2(
@@ -39,6 +41,8 @@ pub(crate) fn analyze_part2(
             project_root: crate::paths::slash_path(&data.project.project_root),
             source_roots: data.project.source_root_output(),
             mode,
+            root_coverage: RootCoverage::Absent,
+            roots: Vec::new(),
             findings: Vec::new(),
             summary: CheckSummary::default(),
             diagnostics,
@@ -55,7 +59,41 @@ pub(crate) fn analyze_part2(
     );
     resolver.collect_operations();
     resolver.solve();
-    let findings = build_findings(&data.graph, &data.parsed_modules, &facts, &resolver, mode);
+    let reachability = ReachabilityBuilder::analyze(
+        &data.graph,
+        &data.project,
+        &data.parsed_modules,
+        &facts,
+        &mut resolver,
+        mode,
+        &mut diagnostics,
+    );
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+    {
+        diagnostics.sort_by(compare_diagnostics);
+        return CheckOutput {
+            schema_version: 1,
+            target_python: data.project.target_python,
+            project_root: crate::paths::slash_path(&data.project.project_root),
+            source_roots: data.project.source_root_output(),
+            mode,
+            root_coverage: reachability.root_coverage,
+            roots: reachability.roots,
+            findings: Vec::new(),
+            summary: CheckSummary::default(),
+            diagnostics,
+        };
+    }
+    let findings = build_findings(
+        &data.graph,
+        &data.parsed_modules,
+        &facts,
+        &resolver,
+        &reachability,
+        mode,
+    );
     let summary = summarize_findings(&findings);
     diagnostics.sort_by(compare_diagnostics);
 
@@ -65,6 +103,8 @@ pub(crate) fn analyze_part2(
         project_root: crate::paths::slash_path(&data.project.project_root),
         source_roots: data.project.source_root_output(),
         mode,
+        root_coverage: reachability.root_coverage,
+        roots: reachability.roots,
         findings,
         summary,
         diagnostics,
@@ -75,8 +115,11 @@ struct ProjectFacts<'a> {
     modules: BTreeMap<ModuleId, &'a ParsedProjectModule>,
     module_names: BTreeMap<ModuleId, String>,
     module_scopes: BTreeMap<ModuleId, cull_core::ScopeId>,
+    module_contexts: BTreeMap<ModuleId, cull_core::ContextId>,
+    definitions_by_id: BTreeMap<DefId, &'a SemanticDefinition>,
     definitions_by_binding: BTreeMap<BindingId, DefId>,
     bindings: BTreeMap<BindingId, &'a BindingFact>,
+    bindings_by_symbol: BTreeMap<cull_core::SymbolId, Vec<BindingId>>,
     bindings_by_module_name_range_kind: BTreeMap<(ModuleId, u32, u32, BindingKind), Vec<BindingId>>,
     references_by_module_range_name: BTreeMap<(ModuleId, u32, u32, String), &'a ReferenceFact>,
     effect_sets: BTreeMap<cull_core::DefinitionEffectSetId, Vec<DefinitionEffectKind>>,
@@ -98,16 +141,28 @@ impl<'a> ProjectFacts<'a> {
             .iter()
             .map(|module| (module.id, module.scope))
             .collect::<BTreeMap<_, _>>();
+        let module_contexts = graph
+            .modules
+            .iter()
+            .map(|module| (module.id, module.context))
+            .collect::<BTreeMap<_, _>>();
 
+        let mut definitions_by_id = BTreeMap::new();
         let mut definitions_by_binding = BTreeMap::new();
         for definition in &graph.definitions {
+            definitions_by_id.insert(definition.id, definition);
             definitions_by_binding.insert(definition.binding, definition.id);
         }
 
         let mut bindings = BTreeMap::new();
+        let mut bindings_by_symbol = BTreeMap::new();
         let mut bindings_by_module_name_range_kind = BTreeMap::new();
         for binding in &graph.bindings {
             bindings.insert(binding.id, binding);
+            bindings_by_symbol
+                .entry(binding.symbol)
+                .or_insert_with(Vec::new)
+                .push(binding.id);
             bindings_by_module_name_range_kind
                 .entry((
                     binding.module,
@@ -145,8 +200,11 @@ impl<'a> ProjectFacts<'a> {
             modules,
             module_names,
             module_scopes,
+            module_contexts,
+            definitions_by_id,
             definitions_by_binding,
             bindings,
+            bindings_by_symbol,
             bindings_by_module_name_range_kind,
             references_by_module_range_name,
             effect_sets,
@@ -180,6 +238,24 @@ impl<'a> ProjectFacts<'a> {
 
     fn module_source(&self, module: ModuleId) -> Option<&'a ParsedProjectModule> {
         self.modules.get(&module).copied()
+    }
+
+    fn module_context(&self, module: ModuleId) -> Option<cull_core::ContextId> {
+        self.module_contexts.get(&module).copied()
+    }
+
+    fn definition(&self, definition: DefId) -> Option<&'a SemanticDefinition> {
+        self.definitions_by_id.get(&definition).copied()
+    }
+
+    fn definition_for_name_range(
+        &self,
+        module: ModuleId,
+        range: TextRange,
+        kind: BindingKind,
+    ) -> Option<DefId> {
+        self.binding_for_alias(module, range, kind)
+            .and_then(|binding| self.definitions_by_binding.get(&binding).copied())
     }
 }
 
@@ -1417,9 +1493,25 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
         }
     }
 
+    fn resolve_expr_value_static(&self, module: ModuleId, expression: &Expr) -> ValueSet {
+        match expression {
+            Expr::Name(name) if matches!(name.ctx, ExprContext::Load) => {
+                let Some(reference) = self.facts.reference_for_name(module, name) else {
+                    return ValueSet::default();
+                };
+                self.resolve_reference_value(reference)
+            }
+            Expr::Attribute(attribute) => {
+                let base = self.resolve_expr_value_static(module, &attribute.value);
+                self.resolve_module_attribute(base, attribute.attr.id.as_str())
+            }
+            _ => ValueSet::default(),
+        }
+    }
+
     fn resolve_reference_value(&self, reference: &ReferenceFact) -> ValueSet {
         let mut value = ValueSet::default();
-        for binding in reaching_bindings(self.graph, reference) {
+        for binding in reaching_bindings(self.graph, self.facts, reference) {
             if let Some(provenance) = self.binding_values.get(&binding) {
                 value.union_with(provenance.clone());
             }
@@ -1496,7 +1588,9 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
                 && self
                     .facts
                     .reference_for_name(module, name)
-                    .is_none_or(|reference| reaching_bindings(self.graph, reference).is_empty())
+                    .is_none_or(|reference| {
+                        reaching_bindings(self.graph, self.facts, reference).is_empty()
+                    })
             {
                 return true;
             }
@@ -1534,6 +1628,1678 @@ impl<'a, 'b> ProjectResolver<'a, 'b> {
     fn is_selected_module(&self, module: ModuleId) -> bool {
         let name = self.facts.module_name(module);
         self.namespace.module_for_name(&name) == Some(module)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum ModuleExecutionMode {
+    Imported,
+    TopLevel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum WorkItem {
+    Module {
+        domain: ReachabilityDomain,
+        module: ModuleId,
+        mode: ModuleExecutionMode,
+    },
+    Context {
+        domain: ReachabilityDomain,
+        context: cull_core::ContextId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExprUse {
+    Runtime,
+    Call,
+    Escape,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ScanLocals {
+    instance_classes: BTreeMap<String, BTreeSet<DefId>>,
+}
+
+#[derive(Clone, Debug)]
+struct ReachabilityAnalysis {
+    root_coverage: RootCoverage,
+    roots: Vec<RootOutput>,
+    production_values: BTreeSet<DefId>,
+    production_contexts: BTreeSet<cull_core::ContextId>,
+    test_values: BTreeSet<DefId>,
+    test_contexts: BTreeSet<cull_core::ContextId>,
+    external_values: BTreeSet<DefId>,
+    external_contexts: BTreeSet<cull_core::ContextId>,
+    graph_edges: BTreeMap<DefId, BTreeSet<DefId>>,
+    dynamic_class_construction: BTreeSet<DefId>,
+}
+
+impl ReachabilityAnalysis {
+    fn production_reachable(&self, definition: &SemanticDefinition) -> bool {
+        match definition.kind {
+            DefinitionKind::Function => self.production_contexts.contains(&definition.context),
+            DefinitionKind::Class => self.production_values.contains(&definition.id),
+        }
+    }
+
+    fn test_reachable(&self, definition: &SemanticDefinition) -> bool {
+        match definition.kind {
+            DefinitionKind::Function => self.test_contexts.contains(&definition.context),
+            DefinitionKind::Class => self.test_values.contains(&definition.id),
+        }
+    }
+
+    fn external_surface_reachable(&self, definition: &SemanticDefinition) -> bool {
+        match definition.kind {
+            DefinitionKind::Function => self.external_contexts.contains(&definition.context),
+            DefinitionKind::Class => self.external_values.contains(&definition.id),
+        }
+    }
+
+    fn roots_considered(&self) -> Vec<String> {
+        self.roots
+            .iter()
+            .filter(|root| root.domain == ReachabilityDomain::Production && root.resolved)
+            .map(|root| root.target.clone())
+            .collect()
+    }
+}
+
+struct ReachabilityBuilder<'a, 'b, 'c> {
+    project: &'a DiscoveredProject,
+    graph: &'a SemanticGraph,
+    parsed_modules: &'a [ParsedProjectModule],
+    facts: &'a ProjectFacts<'a>,
+    resolver: &'b mut ProjectResolver<'a, 'c>,
+    mode: ProjectMode,
+    diagnostics: &'b mut Vec<Diagnostic>,
+    roots: Vec<RootOutput>,
+    production_values: BTreeSet<DefId>,
+    production_contexts: BTreeSet<cull_core::ContextId>,
+    test_values: BTreeSet<DefId>,
+    test_contexts: BTreeSet<cull_core::ContextId>,
+    external_values: BTreeSet<DefId>,
+    external_contexts: BTreeSet<cull_core::ContextId>,
+    module_modes: BTreeSet<(ReachabilityDomain, ModuleId, ModuleExecutionMode)>,
+    graph_edges: BTreeMap<DefId, BTreeSet<DefId>>,
+    dynamic_class_construction: BTreeSet<DefId>,
+    worklist: BTreeSet<WorkItem>,
+}
+
+impl<'a, 'b, 'c> ReachabilityBuilder<'a, 'b, 'c> {
+    fn analyze(
+        graph: &'a SemanticGraph,
+        project: &'a DiscoveredProject,
+        parsed_modules: &'a [ParsedProjectModule],
+        facts: &'a ProjectFacts<'a>,
+        resolver: &'b mut ProjectResolver<'a, 'c>,
+        mode: ProjectMode,
+        diagnostics: &'b mut Vec<Diagnostic>,
+    ) -> ReachabilityAnalysis {
+        let mut builder = Self {
+            project,
+            graph,
+            parsed_modules,
+            facts,
+            resolver,
+            mode,
+            diagnostics,
+            roots: Vec::new(),
+            production_values: BTreeSet::new(),
+            production_contexts: BTreeSet::new(),
+            test_values: BTreeSet::new(),
+            test_contexts: BTreeSet::new(),
+            external_values: BTreeSet::new(),
+            external_contexts: BTreeSet::new(),
+            module_modes: BTreeSet::new(),
+            graph_edges: BTreeMap::new(),
+            dynamic_class_construction: BTreeSet::new(),
+            worklist: BTreeSet::new(),
+        };
+
+        builder.collect_static_graph_edges();
+        builder.seed_roots();
+        builder.solve();
+        let root_coverage = builder.derive_root_coverage();
+
+        ReachabilityAnalysis {
+            root_coverage,
+            roots: builder.roots,
+            production_values: builder.production_values,
+            production_contexts: builder.production_contexts,
+            test_values: builder.test_values,
+            test_contexts: builder.test_contexts,
+            external_values: builder.external_values,
+            external_contexts: builder.external_contexts,
+            graph_edges: builder.graph_edges,
+            dynamic_class_construction: builder.dynamic_class_construction,
+        }
+    }
+
+    fn seed_roots(&mut self) {
+        self.seed_configured_roots();
+        self.seed_script_roots(false);
+        self.seed_script_roots(true);
+        self.seed_main_guard_roots();
+        self.seed_package_main_roots();
+        self.seed_test_roots();
+        if self.mode != ProjectMode::Application {
+            self.seed_external_surface_roots();
+        }
+    }
+
+    fn collect_static_graph_edges(&mut self) {
+        for definition in self.graph.definitions.clone() {
+            let Some(parsed) = self.facts.module_source(definition.module) else {
+                continue;
+            };
+            let Some(body) = definition_body(&parsed.syntax.body, &definition) else {
+                continue;
+            };
+            self.collect_static_edges_from_statements(definition.module, definition.id, body);
+        }
+    }
+
+    fn collect_static_edges_from_statements(
+        &mut self,
+        module: ModuleId,
+        owner: DefId,
+        statements: &[Stmt],
+    ) {
+        for statement in statements {
+            match statement {
+                Stmt::FunctionDef(function) => {
+                    for decorator in &function.decorator_list {
+                        self.collect_static_edges_from_expr(module, owner, &decorator.expression);
+                    }
+                    scan_function_definition_exprs(function, |expr| {
+                        self.collect_static_edges_from_expr(module, owner, expr)
+                    });
+                }
+                Stmt::ClassDef(class) => {
+                    for decorator in &class.decorator_list {
+                        self.collect_static_edges_from_expr(module, owner, &decorator.expression);
+                    }
+                    if let Some(arguments) = &class.arguments {
+                        for arg in &arguments.args {
+                            self.collect_static_edges_from_expr(module, owner, arg);
+                        }
+                        for keyword in &arguments.keywords {
+                            self.collect_static_edges_from_expr(module, owner, &keyword.value);
+                        }
+                    }
+                    self.collect_static_edges_from_statements(module, owner, &class.body);
+                }
+                Stmt::If(if_stmt) if is_type_checking_expr(&if_stmt.test) => {
+                    for clause in &if_stmt.elif_else_clauses {
+                        if clause.test.is_none() {
+                            self.collect_static_edges_from_statements(module, owner, &clause.body);
+                        }
+                    }
+                }
+                Stmt::If(if_stmt) => {
+                    self.collect_static_edges_from_expr(module, owner, &if_stmt.test);
+                    self.collect_static_edges_from_statements(module, owner, &if_stmt.body);
+                    for clause in &if_stmt.elif_else_clauses {
+                        if let Some(test) = &clause.test {
+                            self.collect_static_edges_from_expr(module, owner, test);
+                        }
+                        self.collect_static_edges_from_statements(module, owner, &clause.body);
+                    }
+                }
+                _ => self.collect_static_edges_from_statement(module, owner, statement),
+            }
+        }
+    }
+
+    fn collect_static_edges_from_statement(
+        &mut self,
+        module: ModuleId,
+        owner: DefId,
+        statement: &Stmt,
+    ) {
+        match statement {
+            Stmt::Assign(assign) => {
+                self.collect_static_edges_from_expr(module, owner, &assign.value);
+            }
+            Stmt::AnnAssign(assign) => {
+                if let Some(value) = &assign.value {
+                    self.collect_static_edges_from_expr(module, owner, value);
+                }
+                self.collect_static_edges_from_expr(module, owner, &assign.annotation);
+            }
+            Stmt::AugAssign(assign) => {
+                self.collect_static_edges_from_expr(module, owner, &assign.value);
+            }
+            Stmt::Return(stmt) => {
+                if let Some(value) = &stmt.value {
+                    self.collect_static_edges_from_expr(module, owner, value);
+                }
+            }
+            Stmt::Expr(expr) => self.collect_static_edges_from_expr(module, owner, &expr.value),
+            Stmt::For(stmt) => {
+                self.collect_static_edges_from_expr(module, owner, &stmt.iter);
+                self.collect_static_edges_from_statements(module, owner, &stmt.body);
+                self.collect_static_edges_from_statements(module, owner, &stmt.orelse);
+            }
+            Stmt::While(stmt) => {
+                self.collect_static_edges_from_expr(module, owner, &stmt.test);
+                self.collect_static_edges_from_statements(module, owner, &stmt.body);
+                self.collect_static_edges_from_statements(module, owner, &stmt.orelse);
+            }
+            Stmt::With(stmt) => {
+                for item in &stmt.items {
+                    self.collect_static_edges_from_expr(module, owner, &item.context_expr);
+                }
+                self.collect_static_edges_from_statements(module, owner, &stmt.body);
+            }
+            Stmt::Try(stmt) => {
+                self.collect_static_edges_from_statements(module, owner, &stmt.body);
+                for handler in &stmt.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    if let Some(type_) = &handler.type_ {
+                        self.collect_static_edges_from_expr(module, owner, type_);
+                    }
+                    self.collect_static_edges_from_statements(module, owner, &handler.body);
+                }
+                self.collect_static_edges_from_statements(module, owner, &stmt.orelse);
+                self.collect_static_edges_from_statements(module, owner, &stmt.finalbody);
+            }
+            Stmt::Raise(stmt) => {
+                if let Some(exc) = &stmt.exc {
+                    self.collect_static_edges_from_expr(module, owner, exc);
+                }
+                if let Some(cause) = &stmt.cause {
+                    self.collect_static_edges_from_expr(module, owner, cause);
+                }
+            }
+            Stmt::Assert(stmt) => {
+                self.collect_static_edges_from_expr(module, owner, &stmt.test);
+                if let Some(msg) = &stmt.msg {
+                    self.collect_static_edges_from_expr(module, owner, msg);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_static_edges_from_expr(
+        &mut self,
+        module: ModuleId,
+        owner: DefId,
+        expression: &Expr,
+    ) {
+        let value = self.resolver.resolve_expr_value_static(module, expression);
+        for definition in value.definitions {
+            self.graph_edges
+                .entry(owner)
+                .or_default()
+                .insert(definition);
+        }
+        match expression {
+            Expr::Attribute(attribute) => {
+                self.collect_static_edges_from_expr(module, owner, &attribute.value);
+            }
+            Expr::Call(call) => {
+                self.collect_static_edges_from_expr(module, owner, &call.func);
+                for arg in &call.arguments.args {
+                    self.collect_static_edges_from_expr(module, owner, arg);
+                }
+                for keyword in &call.arguments.keywords {
+                    self.collect_static_edges_from_expr(module, owner, &keyword.value);
+                }
+            }
+            Expr::BoolOp(expr) => {
+                for value in &expr.values {
+                    self.collect_static_edges_from_expr(module, owner, value);
+                }
+            }
+            Expr::Named(expr) => self.collect_static_edges_from_expr(module, owner, &expr.value),
+            Expr::BinOp(expr) => {
+                self.collect_static_edges_from_expr(module, owner, &expr.left);
+                self.collect_static_edges_from_expr(module, owner, &expr.right);
+            }
+            Expr::UnaryOp(expr) => {
+                self.collect_static_edges_from_expr(module, owner, &expr.operand)
+            }
+            Expr::If(expr) => {
+                self.collect_static_edges_from_expr(module, owner, &expr.test);
+                self.collect_static_edges_from_expr(module, owner, &expr.body);
+                self.collect_static_edges_from_expr(module, owner, &expr.orelse);
+            }
+            Expr::Compare(expr) => {
+                self.collect_static_edges_from_expr(module, owner, &expr.left);
+                for comparator in &expr.comparators {
+                    self.collect_static_edges_from_expr(module, owner, comparator);
+                }
+            }
+            Expr::Subscript(expr) => {
+                self.collect_static_edges_from_expr(module, owner, &expr.value);
+                self.collect_static_edges_from_expr(module, owner, &expr.slice);
+            }
+            Expr::List(expr) => {
+                for element in &expr.elts {
+                    self.collect_static_edges_from_expr(module, owner, element);
+                }
+            }
+            Expr::Tuple(expr) => {
+                for element in &expr.elts {
+                    self.collect_static_edges_from_expr(module, owner, element);
+                }
+            }
+            Expr::Set(expr) => {
+                for element in &expr.elts {
+                    self.collect_static_edges_from_expr(module, owner, element);
+                }
+            }
+            Expr::Dict(expr) => {
+                for item in &expr.items {
+                    if let Some(key) = &item.key {
+                        self.collect_static_edges_from_expr(module, owner, key);
+                    }
+                    self.collect_static_edges_from_expr(module, owner, &item.value);
+                }
+            }
+            Expr::Starred(expr) => self.collect_static_edges_from_expr(module, owner, &expr.value),
+            Expr::Slice(expr) => {
+                if let Some(lower) = &expr.lower {
+                    self.collect_static_edges_from_expr(module, owner, lower);
+                }
+                if let Some(upper) = &expr.upper {
+                    self.collect_static_edges_from_expr(module, owner, upper);
+                }
+                if let Some(step) = &expr.step {
+                    self.collect_static_edges_from_expr(module, owner, step);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn seed_configured_roots(&mut self) {
+        for selector in &self.project.configured_roots {
+            let root_id = RootId::new(self.roots.len() as u32);
+            if selector.is_module_root() {
+                match self.resolver.namespace.resolve_absolute(&selector.module) {
+                    LocalModuleResolution::Module(module) => {
+                        self.roots.push(RootOutput {
+                            id: root_id,
+                            kind: RootKind::ConfiguredModule,
+                            invocation: RootInvocation::ExecuteModule,
+                            domain: ReachabilityDomain::Production,
+                            target: selector.raw.clone(),
+                            module: Some(self.facts.module_name(module)),
+                            resolved: true,
+                            detail: "configured module root executes as top-level code".to_owned(),
+                        });
+                        self.mark_module(
+                            ReachabilityDomain::Production,
+                            module,
+                            ModuleExecutionMode::TopLevel,
+                        );
+                    }
+                    _ => self.configured_root_error(
+                        &selector.raw,
+                        root_id,
+                        RootKind::ConfiguredModule,
+                    ),
+                }
+                continue;
+            }
+
+            match self.resolve_selector(selector) {
+                Ok(definition) => {
+                    let module_name = self.facts.definition(definition).map(|definition| {
+                        self.mark_module(
+                            ReachabilityDomain::Production,
+                            definition.module,
+                            ModuleExecutionMode::Imported,
+                        );
+                        self.facts.module_name(definition.module)
+                    });
+                    self.roots.push(RootOutput {
+                        id: root_id,
+                        kind: RootKind::ConfiguredObject,
+                        invocation: RootInvocation::ExternalUse,
+                        domain: ReachabilityDomain::Production,
+                        target: selector.raw.clone(),
+                        module: module_name,
+                        resolved: true,
+                        detail: "configured object root is treated as externally used".to_owned(),
+                    });
+                    self.activate_external_use(ReachabilityDomain::Production, definition);
+                }
+                Err(()) => {
+                    self.configured_root_error(&selector.raw, root_id, RootKind::ConfiguredObject)
+                }
+            }
+        }
+    }
+
+    fn configured_root_error(&mut self, raw: &str, root_id: RootId, kind: RootKind) {
+        self.roots.push(RootOutput {
+            id: root_id,
+            kind,
+            invocation: RootInvocation::ExternalUse,
+            domain: ReachabilityDomain::Production,
+            target: raw.to_owned(),
+            module: None,
+            resolved: false,
+            detail: "configured root could not be resolved exactly".to_owned(),
+        });
+        self.diagnostics.push(Diagnostic::error(
+            "CULL_P3001",
+            format!("configured root `{raw}` could not be resolved exactly"),
+        ));
+    }
+
+    fn seed_script_roots(&mut self, gui: bool) {
+        let (scripts, kind) = if gui {
+            (&self.project.gui_scripts, RootKind::GuiScript)
+        } else {
+            (&self.project.scripts, RootKind::ConsoleScript)
+        };
+        for script in scripts {
+            let root_id = RootId::new(self.roots.len() as u32);
+            match self.resolve_selector(&script.target) {
+                Ok(definition) => {
+                    let module_name = self.facts.definition(definition).map(|definition| {
+                        self.mark_module(
+                            ReachabilityDomain::Production,
+                            definition.module,
+                            ModuleExecutionMode::Imported,
+                        );
+                        self.facts.module_name(definition.module)
+                    });
+                    self.roots.push(RootOutput {
+                        id: root_id,
+                        kind,
+                        invocation: RootInvocation::Call,
+                        domain: ReachabilityDomain::Production,
+                        target: format!("{}={}", script.name, script.target.raw),
+                        module: module_name,
+                        resolved: true,
+                        detail: "project script wrapper imports and calls this target".to_owned(),
+                    });
+                    self.activate_callable(ReachabilityDomain::Production, definition);
+                }
+                Err(()) => {
+                    self.roots.push(RootOutput {
+                        id: root_id,
+                        kind,
+                        invocation: RootInvocation::Call,
+                        domain: ReachabilityDomain::Production,
+                        target: format!("{}={}", script.name, script.target.raw),
+                        module: None,
+                        resolved: false,
+                        detail: "script target is valid metadata but not locally resolved"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn seed_main_guard_roots(&mut self) {
+        let modules = self
+            .parsed_modules
+            .iter()
+            .filter(|parsed| parsed.module.origin_domain == OriginDomain::Production)
+            .filter(|parsed| module_has_main_guard(&parsed.syntax))
+            .map(|parsed| parsed.module.id)
+            .collect::<Vec<_>>();
+        for module in modules {
+            let root_id = RootId::new(self.roots.len() as u32);
+            self.roots.push(RootOutput {
+                id: root_id,
+                kind: RootKind::MainGuard,
+                invocation: RootInvocation::ExecuteModule,
+                domain: ReachabilityDomain::Production,
+                target: self.facts.module_name(module),
+                module: Some(self.facts.module_name(module)),
+                resolved: true,
+                detail: "module contains a recognized __main__ guard".to_owned(),
+            });
+            self.mark_module(
+                ReachabilityDomain::Production,
+                module,
+                ModuleExecutionMode::TopLevel,
+            );
+        }
+    }
+
+    fn seed_package_main_roots(&mut self) {
+        let modules = self
+            .parsed_modules
+            .iter()
+            .filter(|parsed| parsed.module.origin_domain == OriginDomain::Production)
+            .filter(|parsed| parsed.module.name.ends_with(".__main__"))
+            .map(|parsed| parsed.module.id)
+            .collect::<Vec<_>>();
+        for module in modules {
+            let root_id = RootId::new(self.roots.len() as u32);
+            self.roots.push(RootOutput {
+                id: root_id,
+                kind: RootKind::PackageMain,
+                invocation: RootInvocation::ExecuteModule,
+                domain: ReachabilityDomain::Production,
+                target: self.facts.module_name(module),
+                module: Some(self.facts.module_name(module)),
+                resolved: true,
+                detail: "local __main__.py can be executed with python -m".to_owned(),
+            });
+            self.mark_module(
+                ReachabilityDomain::Production,
+                module,
+                ModuleExecutionMode::TopLevel,
+            );
+        }
+    }
+
+    fn seed_test_roots(&mut self) {
+        let modules = self
+            .parsed_modules
+            .iter()
+            .filter(|parsed| parsed.module.origin_domain == OriginDomain::Test)
+            .map(|parsed| parsed.module.id)
+            .collect::<Vec<_>>();
+        for module in modules {
+            let root_id = RootId::new(self.roots.len() as u32);
+            self.roots.push(RootOutput {
+                id: root_id,
+                kind: RootKind::TestRoot,
+                invocation: RootInvocation::ExecuteModule,
+                domain: ReachabilityDomain::Test,
+                target: self.facts.module_name(module),
+                module: Some(self.facts.module_name(module)),
+                resolved: true,
+                detail: "test-origin module is analyzed in the isolated test domain".to_owned(),
+            });
+            self.mark_module(
+                ReachabilityDomain::Test,
+                module,
+                ModuleExecutionMode::Imported,
+            );
+            for definition in self
+                .graph
+                .definitions
+                .iter()
+                .filter(|definition| definition.module == module && definition.reportable)
+                .map(|definition| definition.id)
+                .collect::<Vec<_>>()
+            {
+                self.activate_callable(ReachabilityDomain::Test, definition);
+            }
+        }
+    }
+
+    fn seed_external_surface_roots(&mut self) {
+        let mut surface = BTreeSet::new();
+        for export in &self.resolver.export_references {
+            surface.insert(export.definition);
+        }
+        if self.mode == ProjectMode::Library {
+            for definition in self
+                .graph
+                .definitions
+                .iter()
+                .filter(|definition| definition.reportable && is_public_name(&definition.name))
+            {
+                surface.insert(definition.id);
+            }
+        }
+        for definition in surface {
+            let Some(definition_fact) = self.facts.definition(definition) else {
+                continue;
+            };
+            let root_id = RootId::new(self.roots.len() as u32);
+            self.roots.push(RootOutput {
+                id: root_id,
+                kind: RootKind::LibrarySurface,
+                invocation: RootInvocation::ExternalUse,
+                domain: ReachabilityDomain::ExternalSurface,
+                target: definition_fact.qualified_name.clone(),
+                module: Some(self.facts.module_name(definition_fact.module)),
+                resolved: true,
+                detail: "public or exported surface is externally reachable in this mode"
+                    .to_owned(),
+            });
+            self.mark_module(
+                ReachabilityDomain::ExternalSurface,
+                definition_fact.module,
+                ModuleExecutionMode::Imported,
+            );
+            self.activate_external_use(ReachabilityDomain::ExternalSurface, definition);
+        }
+    }
+
+    fn derive_root_coverage(&mut self) -> RootCoverage {
+        if self.mode == ProjectMode::Library {
+            return RootCoverage::NotApplicable;
+        }
+        let unresolved_declared = self
+            .roots
+            .iter()
+            .any(|root| root.domain == ReachabilityDomain::Production && !root.resolved);
+        let dynamic_unavailable = self.project.dynamic_scripts || self.project.dynamic_gui_scripts;
+        let production_roots = self
+            .roots
+            .iter()
+            .filter(|root| root.domain == ReachabilityDomain::Production && root.resolved)
+            .count();
+        match self.project.root_coverage {
+            Some(crate::config::RootCoverageAssertion::Complete) => {
+                if production_roots == 0 || unresolved_declared || dynamic_unavailable {
+                    self.diagnostics.push(Diagnostic::error(
+                        "CULL_P3002",
+                        "root_coverage = \"complete\" was asserted, but Cull could not validate a complete production root set",
+                    ));
+                    RootCoverage::Partial
+                } else {
+                    RootCoverage::Complete
+                }
+            }
+            Some(crate::config::RootCoverageAssertion::Partial) => {
+                if production_roots == 0 && !unresolved_declared && !dynamic_unavailable {
+                    RootCoverage::Absent
+                } else {
+                    RootCoverage::Partial
+                }
+            }
+            None => {
+                if production_roots == 0 && !unresolved_declared && !dynamic_unavailable {
+                    RootCoverage::Absent
+                } else {
+                    RootCoverage::Partial
+                }
+            }
+        }
+    }
+
+    fn solve(&mut self) {
+        while let Some(item) = self.worklist.pop_first() {
+            match item {
+                WorkItem::Module {
+                    domain,
+                    module,
+                    mode,
+                } => self.scan_module(domain, module, mode),
+                WorkItem::Context { domain, context } => self.scan_context(domain, context),
+            }
+        }
+    }
+
+    fn scan_module(
+        &mut self,
+        domain: ReachabilityDomain,
+        module: ModuleId,
+        mode: ModuleExecutionMode,
+    ) {
+        let Some(parsed) = self.facts.module_source(module) else {
+            return;
+        };
+        let Some(context) = self.facts.module_context(module) else {
+            return;
+        };
+        self.mark_context(domain, context);
+        let mut locals = ScanLocals::default();
+        self.scan_statements(
+            domain,
+            module,
+            context,
+            None,
+            Some(mode),
+            &parsed.syntax.body,
+            &mut locals,
+        );
+    }
+
+    fn scan_context(&mut self, domain: ReachabilityDomain, context: cull_core::ContextId) {
+        let Some(context_fact) = self.graph.contexts.iter().find(|fact| fact.id == context) else {
+            return;
+        };
+        let Some(owner) = context_fact.owner_definition else {
+            return;
+        };
+        let Some(definition) = self.facts.definition(owner) else {
+            return;
+        };
+        let Some(parsed) = self.facts.module_source(definition.module) else {
+            return;
+        };
+        let Some(body) = definition_body(&parsed.syntax.body, definition) else {
+            return;
+        };
+        let mut locals = ScanLocals::default();
+        self.scan_statements(
+            domain,
+            definition.module,
+            context,
+            Some(owner),
+            None,
+            body,
+            &mut locals,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scan_statements(
+        &mut self,
+        domain: ReachabilityDomain,
+        module: ModuleId,
+        context: cull_core::ContextId,
+        owner: Option<DefId>,
+        module_mode: Option<ModuleExecutionMode>,
+        statements: &[Stmt],
+        locals: &mut ScanLocals,
+    ) {
+        for statement in statements {
+            match statement {
+                Stmt::Import(import) => self.scan_import(domain, module, import),
+                Stmt::ImportFrom(import) => self.scan_import_from(domain, module, import),
+                Stmt::FunctionDef(function) => {
+                    let name_range = to_range(function.name.range);
+                    let definition = self.facts.definition_for_name_range(
+                        module,
+                        name_range,
+                        BindingKind::FunctionDefinition,
+                    );
+                    for decorator in &function.decorator_list {
+                        self.scan_expr(
+                            domain,
+                            module,
+                            owner,
+                            &decorator.expression,
+                            ExprUse::Call,
+                            locals,
+                        );
+                    }
+                    if let Some(definition) = definition {
+                        if !function.decorator_list.is_empty() {
+                            self.activate_callable(domain, definition);
+                        }
+                    }
+                    scan_function_definition_exprs(function, |expr| {
+                        self.scan_expr(domain, module, owner, expr, ExprUse::Runtime, locals)
+                    });
+                }
+                Stmt::ClassDef(class) => {
+                    let name_range = to_range(class.name.range);
+                    let definition = self.facts.definition_for_name_range(
+                        module,
+                        name_range,
+                        BindingKind::ClassDefinition,
+                    );
+                    for decorator in &class.decorator_list {
+                        self.scan_expr(
+                            domain,
+                            module,
+                            owner,
+                            &decorator.expression,
+                            ExprUse::Call,
+                            locals,
+                        );
+                    }
+                    if let Some(arguments) = &class.arguments {
+                        for base in &arguments.args {
+                            self.scan_expr(domain, module, owner, base, ExprUse::Runtime, locals);
+                        }
+                        for keyword in &arguments.keywords {
+                            self.scan_expr(
+                                domain,
+                                module,
+                                owner,
+                                &keyword.value,
+                                ExprUse::Runtime,
+                                locals,
+                            );
+                        }
+                    }
+                    if let Some(definition) = definition {
+                        if !class.decorator_list.is_empty() {
+                            self.activate_external_use(domain, definition);
+                        }
+                        if let Some(class_def) = self.facts.definition(definition) {
+                            self.mark_context(domain, class_def.context);
+                            let mut class_locals = ScanLocals::default();
+                            self.scan_statements(
+                                domain,
+                                module,
+                                class_def.context,
+                                Some(definition),
+                                None,
+                                &class.body,
+                                &mut class_locals,
+                            );
+                        }
+                    }
+                }
+                Stmt::Assign(assign) => {
+                    self.scan_assignment(domain, module, owner, assign, locals);
+                }
+                Stmt::AnnAssign(assign) => {
+                    if let Some(value) = &assign.value {
+                        self.scan_expr(domain, module, owner, value, ExprUse::Runtime, locals);
+                    }
+                    if is_attribute_or_subscript_target(&assign.target) {
+                        if let Some(value) = &assign.value {
+                            self.scan_expr(domain, module, owner, value, ExprUse::Escape, locals);
+                        }
+                    }
+                }
+                Stmt::AugAssign(assign) => {
+                    self.scan_expr(
+                        domain,
+                        module,
+                        owner,
+                        &assign.value,
+                        ExprUse::Runtime,
+                        locals,
+                    );
+                }
+                Stmt::Return(stmt) => {
+                    if let Some(value) = &stmt.value {
+                        self.scan_expr(domain, module, owner, value, ExprUse::Escape, locals);
+                    }
+                }
+                Stmt::Expr(expr) => {
+                    self.scan_expr(domain, module, owner, &expr.value, ExprUse::Runtime, locals);
+                }
+                Stmt::If(if_stmt) => {
+                    if let Some(mode) =
+                        module_mode.and_then(|mode| main_guard_mode(&if_stmt.test, mode))
+                    {
+                        match mode {
+                            MainGuardBranch::Body => self.scan_statements(
+                                domain,
+                                module,
+                                context,
+                                owner,
+                                module_mode,
+                                &if_stmt.body,
+                                locals,
+                            ),
+                            MainGuardBranch::Else => {
+                                for clause in &if_stmt.elif_else_clauses {
+                                    if clause.test.is_none() {
+                                        self.scan_statements(
+                                            domain,
+                                            module,
+                                            context,
+                                            owner,
+                                            module_mode,
+                                            &clause.body,
+                                            locals,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    } else if is_type_checking_expr(&if_stmt.test) {
+                        for clause in &if_stmt.elif_else_clauses {
+                            if clause.test.is_none() {
+                                self.scan_statements(
+                                    domain,
+                                    module,
+                                    context,
+                                    owner,
+                                    module_mode,
+                                    &clause.body,
+                                    locals,
+                                );
+                            }
+                        }
+                    } else {
+                        self.scan_expr(
+                            domain,
+                            module,
+                            owner,
+                            &if_stmt.test,
+                            ExprUse::Runtime,
+                            locals,
+                        );
+                        self.scan_statements(
+                            domain,
+                            module,
+                            context,
+                            owner,
+                            module_mode,
+                            &if_stmt.body,
+                            locals,
+                        );
+                        for clause in &if_stmt.elif_else_clauses {
+                            if let Some(test) = &clause.test {
+                                self.scan_expr(
+                                    domain,
+                                    module,
+                                    owner,
+                                    test,
+                                    ExprUse::Runtime,
+                                    locals,
+                                );
+                            }
+                            self.scan_statements(
+                                domain,
+                                module,
+                                context,
+                                owner,
+                                module_mode,
+                                &clause.body,
+                                locals,
+                            );
+                        }
+                    }
+                }
+                _ => self.scan_statement_exprs(domain, module, context, owner, statement, locals),
+            }
+        }
+    }
+
+    fn scan_statement_exprs(
+        &mut self,
+        domain: ReachabilityDomain,
+        module: ModuleId,
+        context: cull_core::ContextId,
+        owner: Option<DefId>,
+        statement: &Stmt,
+        locals: &mut ScanLocals,
+    ) {
+        match statement {
+            Stmt::For(stmt) => {
+                self.scan_expr(domain, module, owner, &stmt.iter, ExprUse::Runtime, locals);
+                self.scan_statements(domain, module, context, owner, None, &stmt.body, locals);
+                self.scan_statements(domain, module, context, owner, None, &stmt.orelse, locals);
+            }
+            Stmt::While(stmt) => {
+                self.scan_expr(domain, module, owner, &stmt.test, ExprUse::Runtime, locals);
+                self.scan_statements(domain, module, context, owner, None, &stmt.body, locals);
+                self.scan_statements(domain, module, context, owner, None, &stmt.orelse, locals);
+            }
+            Stmt::With(stmt) => {
+                for item in &stmt.items {
+                    self.scan_expr(
+                        domain,
+                        module,
+                        owner,
+                        &item.context_expr,
+                        ExprUse::Runtime,
+                        locals,
+                    );
+                }
+                self.scan_statements(domain, module, context, owner, None, &stmt.body, locals);
+            }
+            Stmt::Try(stmt) => {
+                self.scan_statements(domain, module, context, owner, None, &stmt.body, locals);
+                for handler in &stmt.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    if let Some(type_) = &handler.type_ {
+                        self.scan_expr(domain, module, owner, type_, ExprUse::Runtime, locals);
+                    }
+                    self.scan_statements(
+                        domain,
+                        module,
+                        context,
+                        owner,
+                        None,
+                        &handler.body,
+                        locals,
+                    );
+                }
+                self.scan_statements(domain, module, context, owner, None, &stmt.orelse, locals);
+                self.scan_statements(
+                    domain,
+                    module,
+                    context,
+                    owner,
+                    None,
+                    &stmt.finalbody,
+                    locals,
+                );
+            }
+            Stmt::Raise(stmt) => {
+                if let Some(exc) = &stmt.exc {
+                    self.scan_expr(domain, module, owner, exc, ExprUse::Runtime, locals);
+                }
+                if let Some(cause) = &stmt.cause {
+                    self.scan_expr(domain, module, owner, cause, ExprUse::Runtime, locals);
+                }
+            }
+            Stmt::Assert(stmt) => {
+                self.scan_expr(domain, module, owner, &stmt.test, ExprUse::Runtime, locals);
+                if let Some(msg) = &stmt.msg {
+                    self.scan_expr(domain, module, owner, msg, ExprUse::Runtime, locals);
+                }
+            }
+            Stmt::Match(stmt) => {
+                self.scan_expr(
+                    domain,
+                    module,
+                    owner,
+                    &stmt.subject,
+                    ExprUse::Runtime,
+                    locals,
+                );
+                for case in &stmt.cases {
+                    if let Some(guard) = &case.guard {
+                        self.scan_expr(domain, module, owner, guard, ExprUse::Runtime, locals);
+                    }
+                    self.scan_statements(domain, module, context, owner, None, &case.body, locals);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_assignment(
+        &mut self,
+        domain: ReachabilityDomain,
+        module: ModuleId,
+        owner: Option<DefId>,
+        assign: &StmtAssign,
+        locals: &mut ScanLocals,
+    ) {
+        self.scan_expr(
+            domain,
+            module,
+            owner,
+            &assign.value,
+            ExprUse::Runtime,
+            locals,
+        );
+        if let Some(classes) = self.call_class_targets(module, &assign.value) {
+            for target in &assign.targets {
+                if let Some(name) = target_name(target) {
+                    locals
+                        .instance_classes
+                        .insert(name.to_owned(), classes.clone());
+                }
+            }
+        }
+        if assign.targets.iter().any(is_attribute_or_subscript_target) {
+            self.scan_expr(
+                domain,
+                module,
+                owner,
+                &assign.value,
+                ExprUse::Escape,
+                locals,
+            );
+        }
+    }
+
+    fn scan_expr(
+        &mut self,
+        domain: ReachabilityDomain,
+        module: ModuleId,
+        owner: Option<DefId>,
+        expression: &Expr,
+        expr_use: ExprUse,
+        locals: &mut ScanLocals,
+    ) {
+        match expression {
+            Expr::Name(name) if matches!(name.ctx, ExprContext::Load) => {
+                let value = self.resolver.resolve_expr_value_static(module, expression);
+                self.mark_value_set(domain, owner, value, expr_use);
+                if expr_use == ExprUse::Call {
+                    if let Some(classes) = locals.instance_classes.get(name.id.as_str()).cloned() {
+                        for class in classes {
+                            self.activate_class_method(domain, class, "__call__");
+                        }
+                    }
+                }
+            }
+            Expr::Attribute(attribute) => {
+                if expr_use == ExprUse::Call {
+                    if let Expr::Name(base) = &*attribute.value {
+                        if let Some(classes) =
+                            locals.instance_classes.get(base.id.as_str()).cloned()
+                        {
+                            for class in classes {
+                                self.activate_class_method(
+                                    domain,
+                                    class,
+                                    attribute.attr.id.as_str(),
+                                );
+                            }
+                        }
+                    }
+                }
+                let value = self.resolver.resolve_expr_value_static(module, expression);
+                self.mark_value_set(domain, owner, value, expr_use);
+                self.scan_expr(
+                    domain,
+                    module,
+                    owner,
+                    &attribute.value,
+                    ExprUse::Runtime,
+                    locals,
+                );
+            }
+            Expr::Call(call) => {
+                self.scan_expr(domain, module, owner, &call.func, ExprUse::Call, locals);
+                for arg in &call.arguments.args {
+                    self.scan_expr(domain, module, owner, arg, ExprUse::Escape, locals);
+                }
+                for keyword in &call.arguments.keywords {
+                    self.scan_expr(
+                        domain,
+                        module,
+                        owner,
+                        &keyword.value,
+                        ExprUse::Escape,
+                        locals,
+                    );
+                }
+            }
+            Expr::List(expr) => {
+                for element in &expr.elts {
+                    self.scan_expr(domain, module, owner, element, ExprUse::Escape, locals);
+                }
+            }
+            Expr::Tuple(expr) => {
+                for element in &expr.elts {
+                    self.scan_expr(domain, module, owner, element, ExprUse::Escape, locals);
+                }
+            }
+            Expr::Set(expr) => {
+                for element in &expr.elts {
+                    self.scan_expr(domain, module, owner, element, ExprUse::Escape, locals);
+                }
+            }
+            Expr::Dict(expr) => {
+                for item in &expr.items {
+                    if let Some(key) = &item.key {
+                        self.scan_expr(domain, module, owner, key, ExprUse::Runtime, locals);
+                    }
+                    self.scan_expr(domain, module, owner, &item.value, ExprUse::Escape, locals);
+                }
+            }
+            Expr::BoolOp(expr) => {
+                for value in &expr.values {
+                    self.scan_expr(domain, module, owner, value, expr_use, locals);
+                }
+            }
+            Expr::Named(expr) => {
+                self.scan_expr(domain, module, owner, &expr.value, expr_use, locals);
+            }
+            Expr::BinOp(expr) => {
+                self.scan_expr(domain, module, owner, &expr.left, expr_use, locals);
+                self.scan_expr(domain, module, owner, &expr.right, expr_use, locals);
+            }
+            Expr::UnaryOp(expr) => {
+                self.scan_expr(domain, module, owner, &expr.operand, expr_use, locals)
+            }
+            Expr::If(expr) => {
+                self.scan_expr(domain, module, owner, &expr.test, ExprUse::Runtime, locals);
+                self.scan_expr(domain, module, owner, &expr.body, expr_use, locals);
+                self.scan_expr(domain, module, owner, &expr.orelse, expr_use, locals);
+            }
+            Expr::Compare(expr) => {
+                self.scan_expr(domain, module, owner, &expr.left, ExprUse::Runtime, locals);
+                for comparator in &expr.comparators {
+                    self.scan_expr(domain, module, owner, comparator, ExprUse::Runtime, locals);
+                }
+            }
+            Expr::Subscript(expr) => {
+                self.scan_expr(domain, module, owner, &expr.value, ExprUse::Runtime, locals);
+                self.scan_expr(domain, module, owner, &expr.slice, ExprUse::Runtime, locals);
+            }
+            Expr::Starred(expr) => {
+                self.scan_expr(domain, module, owner, &expr.value, expr_use, locals)
+            }
+            Expr::Slice(expr) => {
+                if let Some(lower) = &expr.lower {
+                    self.scan_expr(domain, module, owner, lower, ExprUse::Runtime, locals);
+                }
+                if let Some(upper) = &expr.upper {
+                    self.scan_expr(domain, module, owner, upper, ExprUse::Runtime, locals);
+                }
+                if let Some(step) = &expr.step {
+                    self.scan_expr(domain, module, owner, step, ExprUse::Runtime, locals);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_import(&mut self, domain: ReachabilityDomain, _module: ModuleId, import: &StmtImport) {
+        for alias in &import.names {
+            if let LocalModuleResolution::Module(target) = self
+                .resolver
+                .namespace
+                .resolve_absolute(alias.name.id.as_str())
+            {
+                self.mark_module(domain, target, ModuleExecutionMode::Imported);
+                continue;
+            }
+            if let Some(first) = alias.name.id.as_str().split('.').next() {
+                if let LocalModuleResolution::Module(target) =
+                    self.resolver.namespace.resolve_absolute(first)
+                {
+                    self.mark_module(domain, target, ModuleExecutionMode::Imported);
+                }
+            }
+        }
+    }
+
+    fn scan_import_from(
+        &mut self,
+        domain: ReachabilityDomain,
+        module: ModuleId,
+        import: &StmtImportFrom,
+    ) {
+        let Some(base_name) = self.resolver.namespace.relative_module_name(
+            module,
+            import.level,
+            import.module.as_ref().map(|module| module.id.as_str()),
+        ) else {
+            return;
+        };
+        if let LocalModuleResolution::Module(target) =
+            self.resolver.namespace.resolve_absolute(&base_name)
+        {
+            self.mark_module(domain, target, ModuleExecutionMode::Imported);
+        }
+        for alias in &import.names {
+            if alias.name.id.as_str() == "*" {
+                continue;
+            }
+            let submodule = format!("{base_name}.{}", alias.name.id);
+            if let LocalModuleResolution::Module(target) =
+                self.resolver.namespace.resolve_absolute(&submodule)
+            {
+                self.mark_module(domain, target, ModuleExecutionMode::Imported);
+            }
+        }
+    }
+
+    fn mark_value_set(
+        &mut self,
+        domain: ReachabilityDomain,
+        owner: Option<DefId>,
+        value: ValueSet,
+        expr_use: ExprUse,
+    ) {
+        for definition in value.definitions {
+            if let Some(owner) = owner {
+                self.graph_edges
+                    .entry(owner)
+                    .or_default()
+                    .insert(definition);
+            }
+            self.mark_value(domain, definition);
+            match expr_use {
+                ExprUse::Runtime => {}
+                ExprUse::Call => self.activate_callable(domain, definition),
+                ExprUse::Escape => self.activate_external_use(domain, definition),
+            }
+        }
+        for module in value.modules {
+            self.mark_module(domain, module, ModuleExecutionMode::Imported);
+        }
+    }
+
+    fn mark_module(
+        &mut self,
+        domain: ReachabilityDomain,
+        module: ModuleId,
+        mode: ModuleExecutionMode,
+    ) {
+        if self.module_modes.insert((domain, module, mode)) {
+            self.worklist.insert(WorkItem::Module {
+                domain,
+                module,
+                mode,
+            });
+        }
+    }
+
+    fn mark_value(&mut self, domain: ReachabilityDomain, definition: DefId) {
+        match domain {
+            ReachabilityDomain::Production => {
+                self.production_values.insert(definition);
+            }
+            ReachabilityDomain::Test => {
+                self.test_values.insert(definition);
+            }
+            ReachabilityDomain::ExternalSurface => {
+                self.external_values.insert(definition);
+            }
+        }
+    }
+
+    fn mark_context(&mut self, domain: ReachabilityDomain, context: cull_core::ContextId) {
+        let inserted = match domain {
+            ReachabilityDomain::Production => self.production_contexts.insert(context),
+            ReachabilityDomain::Test => self.test_contexts.insert(context),
+            ReachabilityDomain::ExternalSurface => self.external_contexts.insert(context),
+        };
+        if inserted {
+            self.worklist.insert(WorkItem::Context { domain, context });
+        }
+    }
+
+    fn activate_callable(&mut self, domain: ReachabilityDomain, definition: DefId) {
+        self.mark_value(domain, definition);
+        let Some(definition_fact) = self.facts.definition(definition) else {
+            return;
+        };
+        match definition_fact.kind {
+            DefinitionKind::Function => self.mark_context(domain, definition_fact.context),
+            DefinitionKind::Class => self.activate_class_construction(domain, definition),
+        }
+    }
+
+    fn activate_external_use(&mut self, domain: ReachabilityDomain, definition: DefId) {
+        self.mark_value(domain, definition);
+        let Some(definition_fact) = self.facts.definition(definition) else {
+            return;
+        };
+        match definition_fact.kind {
+            DefinitionKind::Function => self.mark_context(domain, definition_fact.context),
+            DefinitionKind::Class => self.activate_all_class_methods(domain, definition),
+        }
+    }
+
+    fn activate_class_construction(&mut self, domain: ReachabilityDomain, definition: DefId) {
+        self.mark_value(domain, definition);
+        let metaclass = self.resolve_class_metaclass(definition);
+        if let Some(metaclass) = metaclass {
+            self.activate_class_method(domain, metaclass, "__call__");
+        }
+        self.activate_class_method(domain, definition, "__new__");
+        self.activate_class_method(domain, definition, "__init__");
+        if metaclass.is_none() && self.class_has_metaclass_keyword(definition) {
+            self.dynamic_class_construction.insert(definition);
+        }
+    }
+
+    fn activate_all_class_methods(&mut self, domain: ReachabilityDomain, class: DefId) {
+        for method in self.class_methods(class) {
+            self.mark_context(domain, method.context);
+        }
+    }
+
+    fn activate_class_method(&mut self, domain: ReachabilityDomain, class: DefId, name: &str) {
+        for method in self
+            .class_methods(class)
+            .into_iter()
+            .filter(|method| method.name == name)
+        {
+            self.mark_context(domain, method.context);
+        }
+    }
+
+    fn class_methods(&self, class: DefId) -> Vec<&'a SemanticDefinition> {
+        class_methods_for(self.graph, self.facts, class)
+    }
+
+    fn call_class_targets(&self, module: ModuleId, expression: &Expr) -> Option<BTreeSet<DefId>> {
+        let Expr::Call(call) = expression else {
+            return None;
+        };
+        let value = self.resolver.resolve_expr_value_static(module, &call.func);
+        let classes = value
+            .definitions
+            .into_iter()
+            .filter(|definition| {
+                self.facts
+                    .definition(*definition)
+                    .is_some_and(|definition| definition.kind == DefinitionKind::Class)
+            })
+            .collect::<BTreeSet<_>>();
+        (!classes.is_empty()).then_some(classes)
+    }
+
+    fn resolve_class_metaclass(&self, class: DefId) -> Option<DefId> {
+        let definition = self.facts.definition(class)?;
+        let parsed = self.facts.module_source(definition.module)?;
+        let class_stmt = class_statement(&parsed.syntax.body, definition)?;
+        let arguments = class_stmt.arguments.as_ref()?;
+        let keyword = arguments.keywords.iter().find(|keyword| {
+            keyword
+                .arg
+                .as_ref()
+                .is_some_and(|arg| arg.id.as_str() == "metaclass")
+        })?;
+        let value = self
+            .resolver
+            .resolve_expr_value_static(definition.module, &keyword.value);
+        let definitions = value
+            .definitions
+            .into_iter()
+            .filter(|definition| {
+                self.facts
+                    .definition(*definition)
+                    .is_some_and(|definition| definition.kind == DefinitionKind::Class)
+            })
+            .collect::<BTreeSet<_>>();
+        if definitions.len() == 1 {
+            definitions.iter().next().copied()
+        } else {
+            None
+        }
+    }
+
+    fn class_has_metaclass_keyword(&self, class: DefId) -> bool {
+        let Some(definition) = self.facts.definition(class) else {
+            return false;
+        };
+        let Some(parsed) = self.facts.module_source(definition.module) else {
+            return false;
+        };
+        let Some(class_stmt) = class_statement(&parsed.syntax.body, definition) else {
+            return false;
+        };
+        class_stmt.arguments.as_ref().is_some_and(|arguments| {
+            arguments.keywords.iter().any(|keyword| {
+                keyword
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.id.as_str() == "metaclass")
+            })
+        })
+    }
+
+    fn resolve_selector(&mut self, selector: &crate::config::RootSelector) -> Result<DefId, ()> {
+        let LocalModuleResolution::Module(module) =
+            self.resolver.namespace.resolve_absolute(&selector.module)
+        else {
+            return Err(());
+        };
+        let Some((first, rest)) = selector.attributes.split_first() else {
+            return Err(());
+        };
+        let mut definitions = self
+            .resolver
+            .module_slot_value(module, first)
+            .definitions
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for attr in rest {
+            let mut next = BTreeSet::new();
+            for definition in definitions {
+                let Some(definition_fact) = self.facts.definition(definition) else {
+                    continue;
+                };
+                for candidate in self.graph.definitions.iter().filter(|candidate| {
+                    candidate.module == definition_fact.module
+                        && candidate.name == *attr
+                        && self
+                            .facts
+                            .bindings
+                            .get(&candidate.binding)
+                            .is_some_and(|binding| binding.scope == definition_fact.scope)
+                }) {
+                    next.insert(candidate.id);
+                }
+            }
+            definitions = next;
+        }
+        if definitions.len() == 1 {
+            Ok(*definitions.iter().next().unwrap())
+        } else {
+            Err(())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MainGuardBranch {
+    Body,
+    Else,
+}
+
+fn module_has_main_guard(module: &ModModule) -> bool {
+    module.body.iter().any(|statement| {
+        matches!(
+            statement,
+            Stmt::If(if_stmt) if is_main_guard_equality(&if_stmt.test).is_some()
+        )
+    })
+}
+
+fn main_guard_mode(expression: &Expr, mode: ModuleExecutionMode) -> Option<MainGuardBranch> {
+    let expects_top_level = is_main_guard_equality(expression)?;
+    Some(match (expects_top_level, mode) {
+        (true, ModuleExecutionMode::TopLevel) | (false, ModuleExecutionMode::Imported) => {
+            MainGuardBranch::Body
+        }
+        (true, ModuleExecutionMode::Imported) | (false, ModuleExecutionMode::TopLevel) => {
+            MainGuardBranch::Else
+        }
+    })
+}
+
+fn is_main_guard_equality(expression: &Expr) -> Option<bool> {
+    let Expr::Compare(compare) = expression else {
+        return None;
+    };
+    if compare.ops.len() != 1 || compare.comparators.len() != 1 {
+        return None;
+    }
+    let left_name = is_dunder_name_expr(&compare.left);
+    let left_main = is_main_literal_expr(&compare.left);
+    let right_name = is_dunder_name_expr(&compare.comparators[0]);
+    let right_main = is_main_literal_expr(&compare.comparators[0]);
+    if !((left_name && right_main) || (left_main && right_name)) {
+        return None;
+    }
+    match compare.ops[0] {
+        CmpOp::Eq => Some(true),
+        CmpOp::NotEq => Some(false),
+        _ => None,
+    }
+}
+
+fn is_dunder_name_expr(expression: &Expr) -> bool {
+    matches!(expression, Expr::Name(name) if name.id.as_str() == "__name__")
+}
+
+fn is_main_literal_expr(expression: &Expr) -> bool {
+    matches!(expression, Expr::StringLiteral(literal) if literal.value.to_str() == "__main__")
+}
+
+fn definition_body<'a>(
+    statements: &'a [Stmt],
+    definition: &SemanticDefinition,
+) -> Option<&'a [Stmt]> {
+    for statement in statements {
+        match statement {
+            Stmt::FunctionDef(function)
+                if to_range(function.name.range) == definition.name_range =>
+            {
+                return Some(&function.body);
+            }
+            Stmt::FunctionDef(function) => {
+                if let Some(body) = definition_body(&function.body, definition) {
+                    return Some(body);
+                }
+            }
+            Stmt::ClassDef(class) => {
+                if to_range(class.name.range) == definition.name_range {
+                    return Some(&class.body);
+                }
+                if let Some(body) = definition_body(&class.body, definition) {
+                    return Some(body);
+                }
+            }
+            Stmt::If(if_stmt) => {
+                if let Some(body) = definition_body(&if_stmt.body, definition) {
+                    return Some(body);
+                }
+                for clause in &if_stmt.elif_else_clauses {
+                    if let Some(body) = definition_body(&clause.body, definition) {
+                        return Some(body);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn class_statement<'a>(
+    statements: &'a [Stmt],
+    definition: &SemanticDefinition,
+) -> Option<&'a ruff_python_ast::StmtClassDef> {
+    for statement in statements {
+        match statement {
+            Stmt::FunctionDef(function) => {
+                if let Some(class) = class_statement(&function.body, definition) {
+                    return Some(class);
+                }
+            }
+            Stmt::ClassDef(class) if to_range(class.name.range) == definition.name_range => {
+                return Some(class);
+            }
+            Stmt::ClassDef(class) => {
+                if let Some(nested) = class_statement(&class.body, definition) {
+                    return Some(nested);
+                }
+            }
+            Stmt::If(if_stmt) => {
+                if let Some(class) = class_statement(&if_stmt.body, definition) {
+                    return Some(class);
+                }
+                for clause in &if_stmt.elif_else_clauses {
+                    if let Some(class) = class_statement(&clause.body, definition) {
+                        return Some(class);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn scan_function_definition_exprs<'a>(
+    function: &'a ruff_python_ast::StmtFunctionDef,
+    mut scan: impl FnMut(&'a Expr),
+) {
+    for parameter in function.parameters.iter_source_order() {
+        if let Some(default) = parameter.default() {
+            scan(default);
+        }
+        if let Some(annotation) = parameter.annotation() {
+            scan(annotation);
+        }
+    }
+    if let Some(returns) = &function.returns {
+        scan(returns);
+    }
+}
+
+fn is_attribute_or_subscript_target(expression: &Expr) -> bool {
+    match expression {
+        Expr::Attribute(_) | Expr::Subscript(_) => true,
+        Expr::Tuple(tuple) => tuple.elts.iter().any(is_attribute_or_subscript_target),
+        Expr::List(list) => list.elts.iter().any(is_attribute_or_subscript_target),
+        _ => false,
     }
 }
 
@@ -1608,9 +3374,10 @@ fn build_findings(
     parsed_modules: &[ParsedProjectModule],
     facts: &ProjectFacts<'_>,
     resolver: &ProjectResolver<'_, '_>,
+    reachability: &ReachabilityAnalysis,
     mode: ProjectMode,
 ) -> Vec<Finding> {
-    let mut same_module_refs = same_module_references(graph, facts);
+    let same_module_refs = same_module_references(graph, facts);
     let mut cross_refs: BTreeMap<DefId, Vec<&CrossReference>> = BTreeMap::new();
     for reference in &resolver.cross_references {
         cross_refs
@@ -1629,6 +3396,9 @@ fn build_findings(
     for parsed in parsed_modules {
         source_by_module.insert(parsed.module.id, parsed);
     }
+    let dead_cluster_members = dead_cluster_members(graph, reachability, mode);
+    let dynamic_class_construction =
+        dynamic_class_construction_members(graph, facts, resolver, reachability);
 
     let mut findings = Vec::new();
     for definition in graph
@@ -1649,23 +3419,40 @@ fn build_findings(
         if surface == DefinitionSurface::ModuleProtocolHook {
             continue;
         }
-        if exports_by_definition.contains_key(&definition.id) {
-            continue;
-        }
-        if same_module_refs
-            .remove(&definition.id)
-            .is_some_and(|references| !references.is_empty())
-        {
-            continue;
-        }
-        if cross_refs
+
+        let same_refs = same_module_refs
             .get(&definition.id)
-            .is_some_and(|references| !references.is_empty())
-        {
+            .cloned()
+            .unwrap_or_default();
+        let cross_ref_count = cross_refs.get(&definition.id).map_or(0, Vec::len);
+        let export_refs = exports_by_definition
+            .get(&definition.id)
+            .cloned()
+            .unwrap_or_default();
+        let has_inbound = !same_refs.is_empty() || cross_ref_count > 0 || !export_refs.is_empty();
+
+        if is_effectively_reachable(definition, reachability, mode, surface) {
             continue;
         }
 
-        let (mut confidence, mut reason) = confidence_for_surface(mode, surface);
+        let force_root_unreachable = dead_cluster_members.contains(&definition.id);
+        let root_unreachable_enabled = match reachability.root_coverage {
+            RootCoverage::Complete | RootCoverage::Partial => true,
+            RootCoverage::Absent => false,
+            RootCoverage::NotApplicable => mode == ProjectMode::Library,
+        };
+        let finding_type = if force_root_unreachable && root_unreachable_enabled {
+            FindingType::RootUnreachable
+        } else if !has_inbound {
+            FindingType::Unreferenced
+        } else if root_unreachable_enabled {
+            FindingType::RootUnreachable
+        } else {
+            continue;
+        };
+
+        let (mut confidence, mut reason) =
+            confidence_for_finding(mode, surface, finding_type, reachability.root_coverage);
         let mut uncertainty = resolver
             .module_uncertainty
             .get(&definition.module)
@@ -1676,6 +3463,14 @@ fn build_findings(
                 detail: uncertainty.detail().to_owned(),
             })
             .collect::<Vec<_>>();
+        if dynamic_class_construction.contains(&definition.id) {
+            uncertainty.push(FindingUncertainty {
+                kind: FindingUncertaintyKind::DynamicClassConstruction,
+                detail:
+                    "custom class construction may dispatch through unresolved metaclass behavior"
+                        .to_owned(),
+            });
+        }
         if confidence == FindingConfidence::Review {
             uncertainty.push(FindingUncertainty {
                 kind: FindingUncertaintyKind::PublicSurfacePolicy,
@@ -1691,11 +3486,27 @@ fn build_findings(
             continue;
         };
         let (line, column) = line_column(&parsed.source_text, definition.name_range.start);
-        let rule_id = match definition.kind {
-            DefinitionKind::Function => FindingRule::Cull001,
-            DefinitionKind::Class => FindingRule::Cull002,
+        let rule_id = match (definition.kind, finding_type) {
+            (DefinitionKind::Function, FindingType::Unreferenced) => FindingRule::Cull001,
+            (DefinitionKind::Class, FindingType::Unreferenced) => FindingRule::Cull002,
+            (DefinitionKind::Function, FindingType::RootUnreachable) => FindingRule::Cull003,
+            (DefinitionKind::Class, FindingType::RootUnreachable) => FindingRule::Cull004,
         };
         let effects = definition_effects(definition, facts);
+        let inbound_references = same_refs
+            .iter()
+            .filter_map(|reference| finding_reference(reference, facts))
+            .collect::<Vec<_>>();
+        let exports = export_refs
+            .iter()
+            .map(|export| cull_core::FindingExport {
+                public_name: export.public_name.clone(),
+                kind: export.kind,
+                source_module: facts.module_name(export.source_module),
+            })
+            .collect::<Vec<_>>();
+        let origin_domains = origin_domain_summary(&inbound_references, definition.origin_domain);
+        let reference_phases = reference_phase_summary(&inbound_references);
         let finding = Finding {
             id: format!(
                 "{}:{}:{}",
@@ -1704,7 +3515,7 @@ fn build_findings(
                 definition.name
             ),
             rule_id,
-            finding_type: FindingType::Unreferenced,
+            finding_type,
             definition: FindingDefinition {
                 kind: definition.kind,
                 name: definition.name.clone(),
@@ -1716,11 +3527,9 @@ fn build_findings(
                 column,
             },
             confidence,
-            inbound_references: Vec::new(),
-            reachability: FindingReachability {
-                status: FindingReachabilityStatus::NotComputed,
-            },
-            exports: Vec::new(),
+            inbound_references,
+            reachability: reachability_for_finding(definition, reachability, mode, finding_type),
+            exports,
             mode_effect: FindingModeEffect {
                 mode,
                 surface,
@@ -1728,13 +3537,17 @@ fn build_findings(
                 reason,
             },
             uncertainty,
-            origin_domains: vec![FindingOriginSummary {
-                origin_domain: definition.origin_domain,
-                count: 1,
-            }],
-            reference_phases: Vec::new(),
+            origin_domains,
+            reference_phases,
             removal_risk: FindingRemovalRisk::from_semantic(&definition.removal_risk, &effects),
-            explanation: explanation_for(definition, confidence, surface),
+            explanation: explanation_for(
+                definition,
+                confidence,
+                surface,
+                finding_type,
+                force_root_unreachable,
+                reachability,
+            ),
         };
         findings.push(finding);
     }
@@ -1761,7 +3574,7 @@ fn same_module_references<'a>(
 ) -> BTreeMap<DefId, Vec<&'a ReferenceFact>> {
     let mut refs: BTreeMap<DefId, Vec<&ReferenceFact>> = BTreeMap::new();
     for reference in &graph.references {
-        for binding in reaching_bindings(graph, reference) {
+        for binding in reaching_bindings(graph, facts, reference) {
             if let Some(definition) = facts.definitions_by_binding.get(&binding) {
                 refs.entry(*definition).or_default().push(reference);
             }
@@ -1770,19 +3583,359 @@ fn same_module_references<'a>(
     refs
 }
 
-fn reaching_bindings(graph: &SemanticGraph, reference: &ReferenceFact) -> Vec<BindingId> {
+fn dead_cluster_members(
+    graph: &SemanticGraph,
+    reachability: &ReachabilityAnalysis,
+    mode: ProjectMode,
+) -> BTreeSet<DefId> {
+    let unreachable = graph
+        .definitions
+        .iter()
+        .filter(|definition| {
+            !is_definition_reachable_for_cluster(definition, reachability, mode)
+                && definition.role != cull_core::DefinitionRole::OverloadDeclaration
+        })
+        .map(|definition| definition.id)
+        .collect::<BTreeSet<_>>();
+    let mut adjacency: BTreeMap<DefId, BTreeSet<DefId>> = BTreeMap::new();
+    let mut self_cycles = BTreeSet::new();
+    for (source, targets) in &reachability.graph_edges {
+        if !unreachable.contains(source) {
+            continue;
+        }
+        for target in targets {
+            if !unreachable.contains(target) {
+                continue;
+            }
+            adjacency.entry(*source).or_default().insert(*target);
+            adjacency.entry(*target).or_default().insert(*source);
+            if source == target {
+                self_cycles.insert(*source);
+            }
+        }
+    }
+
+    let reportable = graph
+        .definitions
+        .iter()
+        .filter(|definition| definition.reportable)
+        .map(|definition| definition.id)
+        .collect::<BTreeSet<_>>();
+    let mut result = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    for start in unreachable {
+        if !seen.insert(start) {
+            continue;
+        }
+        let mut stack = vec![start];
+        let mut component = BTreeSet::new();
+        while let Some(current) = stack.pop() {
+            component.insert(current);
+            for next in adjacency.get(&current).into_iter().flatten() {
+                if seen.insert(*next) {
+                    stack.push(*next);
+                }
+            }
+        }
+        let reportable_members = component
+            .iter()
+            .filter(|definition| reportable.contains(definition))
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let nontrivial = reportable_members.len() >= 2
+            || reportable_members
+                .iter()
+                .any(|definition| self_cycles.contains(definition));
+        if nontrivial {
+            result.extend(reportable_members);
+        }
+    }
+    result
+}
+
+fn dynamic_class_construction_members(
+    graph: &SemanticGraph,
+    facts: &ProjectFacts<'_>,
+    resolver: &ProjectResolver<'_, '_>,
+    reachability: &ReachabilityAnalysis,
+) -> BTreeSet<DefId> {
+    let mut seeds = reachability.dynamic_class_construction.clone();
+    for definition in graph
+        .definitions
+        .iter()
+        .filter(|definition| definition.kind == DefinitionKind::Class)
+        .filter(|definition| reachability.production_values.contains(&definition.id))
+    {
+        if class_has_unresolved_metaclass(definition, facts, resolver) {
+            seeds.insert(definition.id);
+        }
+    }
+
+    let mut result = BTreeSet::new();
+    for class in seeds {
+        result.insert(class);
+        let mut stack = class_methods_for(graph, facts, class)
+            .into_iter()
+            .map(|method| method.id)
+            .collect::<Vec<_>>();
+        while let Some(definition) = stack.pop() {
+            if !result.insert(definition) {
+                continue;
+            }
+            if let Some(targets) = reachability.graph_edges.get(&definition) {
+                stack.extend(targets.iter().copied());
+            }
+        }
+    }
+    result
+}
+
+fn class_has_unresolved_metaclass(
+    definition: &SemanticDefinition,
+    facts: &ProjectFacts<'_>,
+    resolver: &ProjectResolver<'_, '_>,
+) -> bool {
+    let Some(parsed) = facts.module_source(definition.module) else {
+        return false;
+    };
+    let Some(class_stmt) = class_statement(&parsed.syntax.body, definition) else {
+        return false;
+    };
+    let Some(arguments) = class_stmt.arguments.as_ref() else {
+        return false;
+    };
+    let Some(keyword) = arguments.keywords.iter().find(|keyword| {
+        keyword
+            .arg
+            .as_ref()
+            .is_some_and(|arg| arg.id.as_str() == "metaclass")
+    }) else {
+        return false;
+    };
+    let metaclasses = resolver
+        .resolve_expr_value_static(definition.module, &keyword.value)
+        .definitions
+        .into_iter()
+        .filter(|definition| {
+            facts
+                .definition(*definition)
+                .is_some_and(|definition| definition.kind == DefinitionKind::Class)
+        })
+        .collect::<BTreeSet<_>>();
+    metaclasses.len() != 1
+}
+
+fn class_methods_for<'a>(
+    graph: &'a SemanticGraph,
+    facts: &ProjectFacts<'a>,
+    class: DefId,
+) -> Vec<&'a SemanticDefinition> {
+    let Some(class_def) = facts.definition(class) else {
+        return Vec::new();
+    };
+    graph
+        .definitions
+        .iter()
+        .filter(|definition| definition.module == class_def.module)
+        .filter(|definition| {
+            facts
+                .bindings
+                .get(&definition.binding)
+                .is_some_and(|binding| binding.scope == class_def.scope)
+        })
+        .collect()
+}
+
+fn is_definition_reachable_for_cluster(
+    definition: &SemanticDefinition,
+    reachability: &ReachabilityAnalysis,
+    mode: ProjectMode,
+) -> bool {
+    let surface = definition_surface(
+        definition,
+        reachability.external_values.contains(&definition.id),
+    );
+    is_effectively_reachable(definition, reachability, mode, surface)
+}
+
+fn is_effectively_reachable(
+    definition: &SemanticDefinition,
+    reachability: &ReachabilityAnalysis,
+    mode: ProjectMode,
+    surface: DefinitionSurface,
+) -> bool {
+    if reachability.production_reachable(definition) {
+        return true;
+    }
+    if mode != ProjectMode::Application && reachability.external_surface_reachable(definition) {
+        return true;
+    }
+    if mode == ProjectMode::Library {
+        return matches!(
+            surface,
+            DefinitionSurface::Exported | DefinitionSurface::Public
+        );
+    }
+    false
+}
+
+fn finding_reference(
+    reference: &ReferenceFact,
+    facts: &ProjectFacts<'_>,
+) -> Option<cull_core::FindingReference> {
+    let parsed = facts.module_source(reference.module)?;
+    Some(cull_core::FindingReference {
+        kind: match reference.role {
+            cull_core::ReferenceRole::Import => FindingReferenceKind::Import,
+            cull_core::ReferenceRole::ModuleAttribute => FindingReferenceKind::ModuleAttribute,
+            cull_core::ReferenceRole::Export => FindingReferenceKind::Export,
+            _ => FindingReferenceKind::SameModule,
+        },
+        source_module: facts.module_name(reference.module),
+        source: reference.source_spelling.clone(),
+        file: parsed.module.display_path.clone(),
+        range: reference.span,
+        phase: reference.phase,
+        origin_domain: reference.origin_domain,
+    })
+}
+
+fn origin_domain_summary(
+    references: &[cull_core::FindingReference],
+    definition_origin: OriginDomain,
+) -> Vec<FindingOriginSummary> {
+    let mut counts = vec![FindingOriginSummary {
+        origin_domain: definition_origin,
+        count: 1,
+    }];
+    for reference in references {
+        if let Some(summary) = counts
+            .iter_mut()
+            .find(|summary| summary.origin_domain == reference.origin_domain)
+        {
+            summary.count += 1;
+        } else {
+            counts.push(FindingOriginSummary {
+                origin_domain: reference.origin_domain,
+                count: 1,
+            });
+        }
+    }
+    counts.sort_by_key(|summary| origin_domain_order(summary.origin_domain));
+    counts
+}
+
+fn reference_phase_summary(
+    references: &[cull_core::FindingReference],
+) -> Vec<cull_core::FindingPhaseSummary> {
+    let mut counts = Vec::<cull_core::FindingPhaseSummary>::new();
+    for reference in references {
+        if let Some(summary) = counts
+            .iter_mut()
+            .find(|summary| summary.phase == reference.phase)
+        {
+            summary.count += 1;
+        } else {
+            counts.push(cull_core::FindingPhaseSummary {
+                phase: reference.phase,
+                count: 1,
+            });
+        }
+    }
+    counts.sort_by_key(|summary| reference_phase_order(summary.phase));
+    counts
+}
+
+fn origin_domain_order(domain: OriginDomain) -> u8 {
+    match domain {
+        OriginDomain::Production => 0,
+        OriginDomain::Test => 1,
+        OriginDomain::Unknown => 2,
+    }
+}
+
+fn reference_phase_order(phase: ReferencePhase) -> u8 {
+    match phase {
+        ReferencePhase::DefinitionTime => 0,
+        ReferencePhase::BodyRuntime => 1,
+        ReferencePhase::ImportTime => 2,
+        ReferencePhase::ExportSurface => 3,
+        ReferencePhase::Root => 4,
+        ReferencePhase::TypeOnly => 5,
+        ReferencePhase::LazyAnnotation => 6,
+    }
+}
+
+fn reachability_for_finding(
+    definition: &SemanticDefinition,
+    reachability: &ReachabilityAnalysis,
+    mode: ProjectMode,
+    finding_type: FindingType,
+) -> FindingReachability {
+    let production_reachable = reachability.production_reachable(definition);
+    let test_reachable = reachability.test_reachable(definition);
+    let external_surface_reachable = reachability.external_surface_reachable(definition);
+    let status = match finding_type {
+        FindingType::Unreferenced if reachability.root_coverage == RootCoverage::Absent => {
+            FindingReachabilityStatus::NotComputed
+        }
+        FindingType::Unreferenced if mode == ProjectMode::Library => {
+            FindingReachabilityStatus::NotApplicable
+        }
+        _ => FindingReachabilityStatus::NoRuntimePath,
+    };
+    let mut summary =
+        "no runtime path was found in Cull's static reachability graph from recognized roots"
+            .to_owned();
+    if test_reachable && !production_reachable {
+        summary.push_str("; the definition is reachable only from test roots");
+    }
+    if external_surface_reachable && mode != ProjectMode::Application {
+        summary.push_str("; the definition is protected by external-surface reachability");
+    }
+    FindingReachability {
+        status,
+        root_coverage: reachability.root_coverage,
+        production_reachable,
+        test_reachable,
+        external_surface_reachable,
+        roots_considered: reachability.roots_considered(),
+        summary,
+    }
+}
+
+fn reaching_bindings(
+    graph: &SemanticGraph,
+    facts: &ProjectFacts<'_>,
+    reference: &ReferenceFact,
+) -> Vec<BindingId> {
     let cull_core::ReferenceBindingState::Analyzed(state) = &reference.binding_state else {
         return Vec::new();
     };
     if state.reachability == LocalReachability::Unreachable {
         return Vec::new();
     }
-    graph
+    let mut bindings = graph
         .binding_sets
         .iter()
         .find(|set| set.id == state.bindings)
         .map(|set| set.bindings.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if bindings.is_empty() {
+        if let cull_core::Resolution::Resolved(symbol) = reference.lexical_target {
+            bindings.extend(
+                facts
+                    .bindings_by_symbol
+                    .get(&symbol)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+        }
+    }
+    bindings.sort();
+    bindings.dedup();
+    bindings
 }
 
 fn definition_surface(definition: &SemanticDefinition, exported: bool) -> DefinitionSurface {
@@ -1830,16 +3983,69 @@ fn confidence_for_surface(
     }
 }
 
+fn confidence_for_finding(
+    mode: ProjectMode,
+    surface: DefinitionSurface,
+    finding_type: FindingType,
+    root_coverage: RootCoverage,
+) -> (FindingConfidence, String) {
+    let (mut confidence, mut reason) = confidence_for_surface(mode, surface);
+    if finding_type == FindingType::RootUnreachable {
+        match root_coverage {
+            RootCoverage::Complete => {}
+            RootCoverage::Partial => {
+                confidence = FindingConfidence::Review;
+                reason = "partial root coverage prevents a high-confidence root-unreachable claim"
+                    .to_owned();
+            }
+            RootCoverage::Absent => {
+                confidence = FindingConfidence::Review;
+                reason = "absent root coverage disables high-confidence root-unreachable claims"
+                    .to_owned();
+            }
+            RootCoverage::NotApplicable if mode == ProjectMode::Library => {}
+            RootCoverage::NotApplicable => {
+                confidence = FindingConfidence::Review;
+                reason = "root coverage is not applicable in this mode".to_owned();
+            }
+        }
+        if mode == ProjectMode::Auto && root_coverage != RootCoverage::Complete {
+            confidence = FindingConfidence::Review;
+            reason =
+                "auto mode requires complete production roots for high-confidence CULL003/CULL004"
+                    .to_owned();
+        }
+    }
+    (confidence, reason)
+}
+
 fn explanation_for(
     definition: &SemanticDefinition,
     confidence: FindingConfidence,
     surface: DefinitionSurface,
+    finding_type: FindingType,
+    dead_cluster_override: bool,
+    reachability: &ReachabilityAnalysis,
 ) -> Vec<String> {
-    let mut explanation = vec![
-        "no resolved inbound references were found".to_owned(),
-        "root reachability was not computed in Part 2".to_owned(),
-        format!("definition surface: {surface:?}"),
-    ];
+    let mut explanation = match finding_type {
+        FindingType::Unreferenced => vec!["no resolved inbound references were found".to_owned()],
+        FindingType::RootUnreachable => vec![
+            "resolved inbound references exist or the definition is part of a dead cluster"
+                .to_owned(),
+            "no production runtime path was found from recognized roots".to_owned(),
+        ],
+    };
+    explanation.push(format!("definition surface: {surface:?}"));
+    explanation.push(format!("root coverage: {:?}", reachability.root_coverage));
+    if reachability.test_reachable(definition) && !reachability.production_reachable(definition) {
+        explanation.push("definition is reachable only from test roots".to_owned());
+    }
+    if dead_cluster_override {
+        explanation.push(
+            "dead-cluster priority classified this weak unreachable component as root-unreachable"
+                .to_owned(),
+        );
+    }
     if confidence == FindingConfidence::Review {
         explanation.push("mode or uncertainty prevents a high-confidence claim".to_owned());
     }

@@ -4,7 +4,7 @@ use crate::{
     BindingFact, BindingSetFact, ContextFact, ContextFlowStatusFact, DefinitionEffectKind,
     DefinitionKind, Diagnostic, FlowUncertaintySetFact, InternalCandidateFact, OriginDomain,
     OriginEvidence, OverloadGroupFact, PythonVersion, ReferenceFact, ReferencePhase, RemovalRisk,
-    ScopeFact, SemanticDefinition, SymbolFact, TextRange,
+    RootId, ScopeFact, SemanticDefinition, SymbolFact, TextRange,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -41,6 +41,8 @@ pub struct CheckOutput {
     pub project_root: String,
     pub source_roots: Vec<SourceRootOutput>,
     pub mode: ProjectMode,
+    pub root_coverage: RootCoverage,
+    pub roots: Vec<RootOutput>,
     pub findings: Vec<Finding>,
     pub summary: CheckSummary,
     pub diagnostics: Vec<Diagnostic>,
@@ -76,6 +78,8 @@ pub struct Finding {
 pub enum FindingRule {
     Cull001,
     Cull002,
+    Cull003,
+    Cull004,
 }
 
 impl FindingRule {
@@ -83,6 +87,8 @@ impl FindingRule {
         match self {
             Self::Cull001 => "CULL001",
             Self::Cull002 => "CULL002",
+            Self::Cull003 => "CULL003",
+            Self::Cull004 => "CULL004",
         }
     }
 
@@ -90,6 +96,8 @@ impl FindingRule {
         match self {
             Self::Cull001 => "unreferenced-function",
             Self::Cull002 => "unreferenced-class",
+            Self::Cull003 => "unreachable-function",
+            Self::Cull004 => "unreachable-class",
         }
     }
 }
@@ -98,6 +106,7 @@ impl FindingRule {
 #[serde(rename_all = "snake_case")]
 pub enum FindingType {
     Unreferenced,
+    RootUnreachable,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -142,12 +151,70 @@ pub enum FindingReferenceKind {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FindingReachability {
     pub status: FindingReachabilityStatus,
+    pub root_coverage: RootCoverage,
+    pub production_reachable: bool,
+    pub test_reachable: bool,
+    pub external_surface_reachable: bool,
+    pub roots_considered: Vec<String>,
+    pub summary: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingReachabilityStatus {
     NotComputed,
+    NoRuntimePath,
+    NotApplicable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootCoverage {
+    Complete,
+    Partial,
+    Absent,
+    NotApplicable,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RootOutput {
+    pub id: RootId,
+    pub kind: RootKind,
+    pub invocation: RootInvocation,
+    pub domain: ReachabilityDomain,
+    pub target: String,
+    pub module: Option<String>,
+    pub resolved: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootKind {
+    ConfiguredModule,
+    ConfiguredObject,
+    ConsoleScript,
+    GuiScript,
+    MainGuard,
+    PackageMain,
+    TestRoot,
+    LibrarySurface,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootInvocation {
+    ExecuteModule,
+    ExternalUse,
+    Call,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReachabilityDomain {
+    Production,
+    Test,
+    ExternalSurface,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -193,6 +260,7 @@ pub struct FindingUncertainty {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingUncertaintyKind {
+    DynamicClassConstruction,
     DynamicExport,
     DynamicImport,
     DynamicModuleAttribute,
