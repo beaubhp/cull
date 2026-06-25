@@ -1,0 +1,3 @@
+# Keep the synthetic benchmark corpus auditable without letting it dominate
+# GitHub Linguist language statistics for the Rust analyzer repository.
+benchmark/projects/** linguist-vendored
