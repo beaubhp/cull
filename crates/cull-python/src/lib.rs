@@ -16,10 +16,15 @@ pub use analysis::{
     analyze_debug_references, CheckOptions, DebugBindingsOptions, DebugCandidatesOptions,
     DebugDefinitionsOptions, DebugReferencesOptions,
 };
-pub use config::{ProjectConfig, SourceRootKind};
+pub use config::{
+    ConfigError, ProjectConfig, ProjectScript, RootCoverageAssertion, RootSelector, SourceRootKind,
+};
 pub use decode::{decode_python_source, DecodedSource, SourceDecodeError};
-pub use discovery::{discover_project, DiscoveredModule, DiscoveredProject};
-pub use frontend::{ParsedModule, PythonFrontend};
+pub use discovery::{
+    discover_project, DiscoveredModule, DiscoveredProject, DiscoveryError, DiscoveryOptions,
+    SourceRoot,
+};
+pub use frontend::{ParseInput, ParsedModule, PythonFrontend};
 pub use module_namespace::{
     LocalModuleResolution, ModuleNamespaceIndex, ModuleProviderFact, ModuleProviderKind,
     ModuleProviderStatus, NamespacePackageFact, PathEntryFact,

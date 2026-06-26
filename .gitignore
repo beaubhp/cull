@@ -1,5 +1,8 @@
 /target/
 /fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/coverage/
 /.context/
 __pycache__/
 *.pyc

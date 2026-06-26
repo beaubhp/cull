@@ -140,6 +140,22 @@ fn invalid_config_target_python_exits_two() {
 }
 
 #[test]
+fn unsupported_config_target_python_exits_two() {
+    let temp = tempfile::tempdir().unwrap();
+    write_file(temp.path(), "src/pkg/__init__.py", "");
+    write_file(
+        temp.path(),
+        "pyproject.toml",
+        "[tool.cull]\nsrc = 'src'\ntarget-python = '3.99'\n",
+    );
+
+    let output = cull().arg("check").arg(temp.path()).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid [tool.cull].target-python"));
+}
+
+#[test]
 fn config_target_python_accepts_python_prefix() {
     let temp = tempfile::tempdir().unwrap();
     write_file(temp.path(), "src/pkg/__init__.py", "");
@@ -158,6 +174,33 @@ fn config_target_python_accepts_python_prefix() {
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+}
+
+#[test]
+fn invalid_exclude_glob_exits_two() {
+    let temp = tempfile::tempdir().unwrap();
+    write_file(temp.path(), "src/pkg/__init__.py", "");
+    write_file(
+        temp.path(),
+        "pyproject.toml",
+        "[tool.cull]\nsrc = 'src'\nexclude = ['[']\n",
+    );
+
+    let output = cull()
+        .arg("check")
+        .arg(temp.path())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "CULL_P0007"));
 }
 
 #[test]
@@ -186,6 +229,20 @@ fn invalid_config_mode_in_json_emits_valid_json_error_document() {
         .as_str()
         .unwrap()
         .contains("invalid [tool.cull].mode"));
+}
+
+#[test]
+fn text_diagnostics_label_byte_offsets() {
+    let temp = tempfile::tempdir().unwrap();
+    write_file(temp.path(), "src/pkg/__init__.py", "");
+    write_file(temp.path(), "src/pkg/broken.py", "def broken(:\n    pass\n");
+    write_file(temp.path(), "pyproject.toml", "[tool.cull]\nsrc = 'src'\n");
+
+    let output = cull().arg("check").arg(temp.path()).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("src/pkg/broken.py:bytes "));
 }
 
 #[test]
@@ -343,6 +400,24 @@ fn explain_ambiguous_alias_exits_two_with_candidates() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["result"]["status"], "ambiguous");
     assert_eq!(json["result"]["candidates"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn explain_json_error_preserves_requested_selector() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let output = cull()
+        .arg("explain")
+        .arg("missing.selector")
+        .arg(temp.path().join("does-not-exist"))
+        .arg("--format")
+        .arg("json")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["selector"], "missing.selector");
 }
 
 #[test]

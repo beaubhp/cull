@@ -207,6 +207,7 @@ fn run() -> Result<ExitCode, String> {
             mode,
             allow_partial,
         } => {
+            let requested_selector = selector.clone();
             let output = match explain_selector(
                 selector,
                 path,
@@ -218,7 +219,7 @@ fn run() -> Result<ExitCode, String> {
                 Ok(output) => output,
                 Err(diagnostic) => {
                     if matches!(format, OutputFormat::Json) {
-                        let output = error_explain_output(diagnostic);
+                        let output = error_explain_output(requested_selector, diagnostic);
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&output)
@@ -562,10 +563,10 @@ fn error_check_output(diagnostic: Diagnostic) -> CheckOutput {
     }
 }
 
-fn error_explain_output(diagnostic: Diagnostic) -> ExplainOutput {
+fn error_explain_output(selector: String, diagnostic: Diagnostic) -> ExplainOutput {
     ExplainOutput {
         schema_version: 3,
-        selector: String::new(),
+        selector,
         analysis: CheckAnalysis {
             mode: ProjectMode::Auto,
             target_python: PythonVersion::default(),
@@ -660,9 +661,9 @@ fn subject_finding_summary(finding_type: FindingType, subject: &FindingSubject) 
 
 fn format_diagnostic(diagnostic: &Diagnostic) -> String {
     let location = match (&diagnostic.path, &diagnostic.range) {
-        (Some(path), Some(range)) => format!("{path}:{}:{}", range.start, range.end),
+        (Some(path), Some(range)) => format!("{path}:bytes {}..{}", range.start, range.end),
         (Some(path), None) => path.clone(),
-        (None, Some(range)) => format!("{}:{}", range.start, range.end),
+        (None, Some(range)) => format!("bytes {}..{}", range.start, range.end),
         (None, None) => "<project>".to_owned(),
     };
     format!(

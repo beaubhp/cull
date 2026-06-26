@@ -95,9 +95,7 @@ pub enum ConfigError {
     InvalidMode(String),
     #[error("invalid [tool.cull].root_coverage `{0}`; expected complete or partial")]
     InvalidRootCoverage(String),
-    #[error(
-        "invalid [tool.cull].target-python/target-version `{0}`; expected 3.14, py3.14, or py314"
-    )]
+    #[error("invalid [tool.cull].target-python/target-version `{0}`; expected 3.10 through 3.15")]
     InvalidTargetPython(String),
     #[error("invalid root object reference `{0}`; expected module or module:object.attr")]
     InvalidRootReference(String),

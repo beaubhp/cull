@@ -333,6 +333,44 @@ class BenchmarkRunnerTests(unittest.TestCase):
         self.assertEqual([item.category for item in high], ["unused_import"])
         self.assertEqual([item.category for item in reported], ["unused_import", "unused_local"])
 
+    def test_malformed_cull_json_fails_closed(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "Cull JSON could not be parsed"):
+            benchmark_run.parse_cull("{not json", include_review=False)
+
+    def test_parse_stable_tool_output_rejects_nondeterministic_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self.make_project(root)
+            first = json.dumps(
+                {
+                    "findings": [
+                        {
+                            "finding_id": "CULL003-A",
+                            "rule_id": "CULL003",
+                            "confidence": "high",
+                            "subject": {
+                                "subject_type": "definition",
+                                "kind": "function",
+                                "file": "src/pkg/mod.py",
+                                "line": 3,
+                                "name": "legacy_path",
+                            },
+                        }
+                    ]
+                }
+            )
+            second = json.dumps({"findings": []})
+
+            with self.assertRaisesRegex(SystemExit, "output changed across measured runs"):
+                benchmark_run.parse_stable_tool_output(
+                    tool="cull",
+                    project=project,
+                    runs=[
+                        command_run(tool="cull", stdout=first),
+                        command_run(tool="cull", stdout=second),
+                    ],
+                )
+
     def test_parse_vulture_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -410,17 +448,67 @@ class BenchmarkRunnerTests(unittest.TestCase):
                     command_run(tool="cull", exit_code=124, timed_out=True),
                 )
 
-    def test_validate_parse_warnings_rejects_unparsed_output(self) -> None:
+    def test_parse_warnings_include_unsupported_categories(self) -> None:
+        self.assertEqual(
+            benchmark_run.unparsed_vulture_lines(
+                "pkg.py:4: unused attribute 'value' (60% confidence)\n"
+            ),
+            [
+                "unsupported Vulture category: "
+                "pkg.py:4: unused attribute 'value' (60% confidence)"
+            ],
+        )
+        self.assertEqual(
+            benchmark_run.unparsed_deadcode_lines(
+                "pkg.py:4:1: DC09 Property `value` is never used\n"
+            ),
+            [
+                "unsupported deadcode category: "
+                "pkg.py:4:1: DC09 Property `value` is never used"
+            ],
+        )
+
+    def test_time_command_uses_darwin_time_only_on_darwin(self) -> None:
+        command = ["tool", "arg"]
+        original_platform = benchmark_run.sys.platform
+        try:
+            benchmark_run.sys.platform = "linux"
+            self.assertEqual(benchmark_run.time_command(command), command)
+            benchmark_run.sys.platform = "darwin"
+            timed = benchmark_run.time_command(command)
+            if Path("/usr/bin/time").exists():
+                self.assertEqual(timed[:2], ["/usr/bin/time", "-l"])
+                self.assertEqual(timed[2:], command)
+            else:
+                self.assertEqual(timed, command)
+        finally:
+            benchmark_run.sys.platform = original_platform
+
+    def test_raw_output_path_is_result_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            project = self.make_project(root)
+            raw_root = root / "results" / "raw" / "latest"
+            path = benchmark_run.write_raw_output(
+                raw_root,
+                "cull",
+                "case",
+                command_run(tool="cull", stdout="{}"),
+                run_index=1,
+            )
 
-            with self.assertRaisesRegex(SystemExit, "could not be fully parsed"):
-                benchmark_run.validate_parse_warnings(
-                    "cull",
-                    project,
-                    ["Cull JSON could not be parsed"],
-                )
+        self.assertEqual(path.relative_to(root), Path("results/raw/latest/cull/case-run-01.txt"))
+
+    def test_prepare_raw_root_removes_stale_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw_root = Path(directory) / "results" / "raw" / "latest"
+            stale = raw_root / "vulture" / "old.txt"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("stale", encoding="utf-8")
+
+            benchmark_run.prepare_raw_root(raw_root)
+
+            self.assertTrue(raw_root.exists())
+            self.assertFalse(stale.exists())
 
     def test_markdown_and_json_report_generation_smoke(self) -> None:
         result = {

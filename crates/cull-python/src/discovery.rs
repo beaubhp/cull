@@ -123,9 +123,9 @@ pub fn discover_project(options: DiscoveryOptions) -> Result<DiscoveredProject, 
         &options.explicit_source_roots,
         &config.source_roots,
     );
-    let exclude_set = build_exclude_set(&config.excludes);
 
     let mut diagnostics = Vec::new();
+    let exclude_set = build_exclude_set(&config.excludes, &mut diagnostics);
     let mut discovered = Vec::new();
     for source_root in &source_roots {
         if !source_root.path.exists() {
@@ -249,14 +249,29 @@ fn absolutize(project_root: &Path, path: &Path) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
 }
 
-fn build_exclude_set(excludes: &[String]) -> Option<GlobSet> {
+fn build_exclude_set(excludes: &[String], diagnostics: &mut Vec<Diagnostic>) -> Option<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in excludes {
-        if let Ok(glob) = Glob::new(pattern) {
-            builder.add(glob);
+        match Glob::new(pattern) {
+            Ok(glob) => {
+                builder.add(glob);
+            }
+            Err(error) => diagnostics.push(Diagnostic::error(
+                "CULL_P0007",
+                format!("invalid exclude glob `{pattern}`: {error}"),
+            )),
         }
     }
-    builder.build().ok().filter(|set| !set.is_empty())
+    match builder.build() {
+        Ok(set) => (!set.is_empty()).then_some(set),
+        Err(error) => {
+            diagnostics.push(Diagnostic::error(
+                "CULL_P0006",
+                format!("invalid exclude glob set: {error}"),
+            ));
+            None
+        }
+    }
 }
 
 fn collect_modules(

@@ -91,7 +91,12 @@ impl FromStr for PythonVersion {
         let minor = minor
             .parse()
             .map_err(|_| PythonVersionParseError(original.to_owned()))?;
-        Ok(Self { major, minor })
+        let version = Self { major, minor };
+        if version.is_candidate_semantic_version() || version.is_forward_canary() {
+            Ok(version)
+        } else {
+            Err(PythonVersionParseError(original.to_owned()))
+        }
     }
 }
 
@@ -117,6 +122,17 @@ mod tests {
     fn rejects_invalid_python_version_spellings() {
         assert!("py".parse::<PythonVersion>().is_err());
         assert!("three.fourteen".parse::<PythonVersion>().is_err());
+        assert!("3.9".parse::<PythonVersion>().is_err());
+        assert!("3.99".parse::<PythonVersion>().is_err());
+        assert!("4.0".parse::<PythonVersion>().is_err());
+    }
+
+    #[test]
+    fn accepts_forward_canary_python_version() {
+        assert_eq!(
+            "3.15".parse::<PythonVersion>().unwrap(),
+            PythonVersion::PY315
+        );
     }
 }
 

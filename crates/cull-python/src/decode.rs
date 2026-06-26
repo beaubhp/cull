@@ -79,9 +79,22 @@ fn normalize_encoding(encoding: &str) -> String {
 }
 
 fn find_declared_encoding(bytes: &[u8]) -> Option<String> {
-    first_two_lines(bytes)
-        .into_iter()
-        .find_map(extract_encoding_from_line)
+    let lines = first_two_lines(bytes);
+    if let Some(encoding) = lines
+        .first()
+        .and_then(|line| extract_encoding_from_line(line))
+    {
+        return Some(encoding);
+    }
+    if lines
+        .first()
+        .is_none_or(|line| is_blank_or_comment_only(line))
+    {
+        return lines
+            .get(1)
+            .and_then(|line| extract_encoding_from_line(line));
+    }
+    None
 }
 
 fn first_two_lines(bytes: &[u8]) -> Vec<&[u8]> {
@@ -111,12 +124,15 @@ fn extract_encoding_from_line(line: &[u8]) -> Option<String> {
         return None;
     }
 
-    let line = String::from_utf8_lossy(line);
-    let bytes = line.as_bytes();
-    let coding = find_ascii_subslice(bytes, b"coding")?;
-    let after = bytes.get(coding + b"coding".len()..)?;
-    let delimiter = after.iter().position(|byte| matches!(*byte, b':' | b'='))?;
-    let mut label_start = coding + b"coding".len() + delimiter + 1;
+    let bytes = line;
+    let coding = bytes
+        .windows(b"coding".len())
+        .position(|window| window == b"coding")?;
+    let delimiter = *bytes.get(coding + b"coding".len())?;
+    if !matches!(delimiter, b':' | b'=') {
+        return None;
+    }
+    let mut label_start = coding + b"coding".len() + 1;
     while matches!(bytes.get(label_start), Some(b' ' | b'\t')) {
         label_start += 1;
     }
@@ -126,21 +142,29 @@ fn extract_encoding_from_line(line: &[u8]) -> Option<String> {
         .map(|offset| label_start + offset)
         .unwrap_or(bytes.len());
 
-    (label_start < label_end).then(|| line[label_start..label_end].to_owned())
+    (label_start < label_end).then(|| {
+        String::from_utf8(bytes[label_start..label_end].to_vec())
+            .expect("encoding labels are ASCII")
+    })
 }
 
 fn trim_cr(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\r").unwrap_or(line)
 }
 
-fn is_encoding_label_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+fn is_blank_or_comment_only(line: &[u8]) -> bool {
+    let line = trim_cr(line);
+    let Some(first_non_ws) = line
+        .iter()
+        .position(|byte| !matches!(*byte, b' ' | b'\t' | 0x0c))
+    else {
+        return true;
+    };
+    line[first_non_ws] == b'#'
 }
 
-fn find_ascii_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window.eq_ignore_ascii_case(needle))
+fn is_encoding_label_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
 }
 
 #[cfg(test)]
@@ -159,6 +183,42 @@ mod tests {
         let decoded = decode_python_source(b"# coding: latin-1\nname = '\xe9'\n").unwrap();
         assert_eq!(decoded.text, "# coding: latin-1\nname = 'é'\n");
         assert_eq!(decoded.info.encoding, "latin-1");
+    }
+
+    #[test]
+    fn decodes_emacs_style_cookie() {
+        let decoded = decode_python_source(b"# -*- coding: latin-1 -*-\nname = '\xe9'\n").unwrap();
+        assert_eq!(decoded.text, "# -*- coding: latin-1 -*-\nname = 'é'\n");
+        assert_eq!(decoded.info.encoding, "latin-1");
+    }
+
+    #[test]
+    fn decodes_second_line_cookie_after_comment_or_blank_only() {
+        let after_comment =
+            decode_python_source(b"# module header\n# coding: latin-1\nname = '\xe9'\n").unwrap();
+        assert_eq!(after_comment.info.encoding, "latin-1");
+
+        let after_blank = decode_python_source(b"\n# coding: latin-1\nname = '\xe9'\n").unwrap();
+        assert_eq!(after_blank.info.encoding, "latin-1");
+    }
+
+    #[test]
+    fn ignores_second_line_cookie_after_code_like_cpython() {
+        let error = decode_python_source(b"x = 1\n# coding: latin-1\nname = '\xe9'\n").unwrap_err();
+        assert!(matches!(error, SourceDecodeError::InvalidEncoding { .. }));
+    }
+
+    #[test]
+    fn ignores_loose_encoding_mentions_like_cpython() {
+        for source in [
+            b"# coding = latin-1\nname = '\xe9'\n".as_slice(),
+            b"# encoding = latin-1\nname = '\xe9'\n".as_slice(),
+            b"# coding nonsense: latin-1\nname = '\xe9'\n".as_slice(),
+            b"# CODING: latin-1\nname = '\xe9'\n".as_slice(),
+        ] {
+            let error = decode_python_source(source).unwrap_err();
+            assert!(matches!(error, SourceDecodeError::InvalidEncoding { .. }));
+        }
     }
 
     #[test]

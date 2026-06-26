@@ -9,6 +9,7 @@ scores deterministic results.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -103,6 +104,13 @@ class CommandRun:
     timed_out: bool = False
 
 
+@dataclass(frozen=True)
+class ParsedToolOutput:
+    findings: list[ToolFinding]
+    parse_warnings: list[str]
+    review_findings: list[ToolFinding] | None = None
+
+
 @dataclass
 class Project:
     id: str
@@ -164,6 +172,7 @@ def main() -> int:
 
     tools = parse_tools(args.tools)
     validate_runtime_args(args, tools, repo_root)
+    result_path = resolve_result_path(repo_root, benchmark_root, args.results)
     result = run_benchmark(
         benchmark_root=benchmark_root,
         repo_root=repo_root,
@@ -173,12 +182,12 @@ def main() -> int:
         corpus=corpus,
         tools=tools,
         cull=(repo_root / args.cull).resolve(),
+        raw_root=result_path.parent / "raw" / result_path.stem,
         runs=args.runs,
         warmups=args.warmups,
         timeout=args.timeout,
     )
     result = normalize_paths(result, repo_root)
-    result_path = resolve_result_path(repo_root, benchmark_root, args.results)
     result_path.parent.mkdir(parents=True, exist_ok=True)
     write_json(result_path, result)
     write_markdown(result_path.with_suffix(".md"), result)
@@ -453,12 +462,12 @@ def run_benchmark(
     corpus: dict[str, Any],
     tools: list[str],
     cull: Path,
+    raw_root: Path,
     runs: int,
     warmups: int,
     timeout: float,
 ) -> dict[str, Any]:
-    raw_root = benchmark_root / "results" / "raw"
-    raw_root.mkdir(parents=True, exist_ok=True)
+    prepare_raw_root(raw_root)
     tool_metadata = collect_tool_metadata(repo_root, cull, tools)
     project_results = []
 
@@ -474,37 +483,32 @@ def run_benchmark(
                 warmups=warmups,
                 timeout=timeout,
             )
-            raw_path = write_raw_output(raw_root, tool, project.id, run_result["last_run"])
-            findings = parse_tool_findings(
+            raw_paths = write_raw_outputs(
+                raw_root,
                 tool,
-                run_result["last_run"].stdout,
-                project.path,
-                include_cull_review=False,
+                project.id,
+                run_result["measured_runs"],
             )
-            parse_warnings = collect_parse_warnings(
-                tool,
-                run_result["last_run"].stdout,
+            parsed = parse_stable_tool_output(
+                tool=tool,
+                project=project,
+                runs=run_result["measured_runs"],
             )
-            validate_parse_warnings(tool, project, parse_warnings)
-            metrics = score_findings(expected, findings)
+            metrics = score_findings(expected, parsed.findings)
             result.tool_results[tool] = {
                 "command": run_result["command"],
                 "version": tool_metadata[tool]["version"],
                 "runs": [serialize_run(run) for run in run_result["measured_runs"]],
                 "median_seconds": median([run.seconds for run in run_result["measured_runs"]]),
                 "max_rss_bytes": max_rss(run_result["measured_runs"]),
-                "raw_output": os.fspath(raw_path),
-                "finding_count": len(findings),
-                "parse_warnings": parse_warnings,
+                "raw_output": os.fspath(raw_paths[-1]),
+                "raw_outputs": [os.fspath(path) for path in raw_paths],
+                "finding_count": len(parsed.findings),
+                "parse_warnings": parsed.parse_warnings,
                 "metrics": metrics,
             }
             if tool == "cull":
-                review_findings = parse_tool_findings(
-                    tool,
-                    run_result["last_run"].stdout,
-                    project.path,
-                    include_cull_review=True,
-                )
+                review_findings = parsed.review_findings or []
                 result.cull_high_plus_review = {
                     "finding_count": len(review_findings),
                     "metrics": score_findings(expected, review_findings),
@@ -527,6 +531,12 @@ def run_benchmark(
     return result
 
 
+def prepare_raw_root(raw_root: Path) -> None:
+    if raw_root.exists():
+        shutil.rmtree(raw_root)
+    raw_root.mkdir(parents=True)
+
+
 def run_tool_project(
     *,
     tool: str,
@@ -544,8 +554,76 @@ def run_tool_project(
         run = run_command(command, timeout)
         validate_command_run(tool, project, run)
         measured.append(run)
-    last = measured[-1]
-    return {"command": command, "measured_runs": measured, "last_run": last}
+    return {"command": command, "measured_runs": measured}
+
+
+def parse_stable_tool_output(
+    *,
+    tool: str,
+    project: Project,
+    runs: list[CommandRun],
+) -> ParsedToolOutput:
+    parsed_runs = []
+    for run in runs:
+        findings = parse_tool_findings(
+            tool,
+            run.stdout,
+            project.path,
+            include_cull_review=False,
+        )
+        review_findings = None
+        if tool == "cull":
+            review_findings = parse_tool_findings(
+                tool,
+                run.stdout,
+                project.path,
+                include_cull_review=True,
+            )
+        parsed_runs.append(
+            ParsedToolOutput(
+                findings=findings,
+                parse_warnings=collect_parse_warnings(tool, run.stdout),
+                review_findings=review_findings,
+            )
+        )
+
+    baseline = parsed_runs[0]
+    baseline_key = canonical_parsed_output(baseline)
+    for index, parsed in enumerate(parsed_runs[1:], start=2):
+        if canonical_parsed_output(parsed) != baseline_key:
+            raise SystemExit(
+                f"{tool} output changed across measured runs on {project.id}; "
+                f"run 1 and run {index} produced different parsed findings"
+            )
+    return baseline
+
+
+def canonical_parsed_output(parsed: ParsedToolOutput) -> tuple[
+    list[tuple[str, str, int, str, str, str]],
+    tuple[str, ...],
+    list[tuple[str, str, int, str, str, str]],
+]:
+    return (
+        canonical_findings(parsed.findings),
+        tuple(sorted(parsed.parse_warnings)),
+        canonical_findings(parsed.review_findings or []),
+    )
+
+
+def canonical_findings(
+    findings: list[ToolFinding],
+) -> list[tuple[str, str, int, str, str, str]]:
+    return sorted(
+        (
+            finding.category,
+            finding.path,
+            finding.line,
+            finding.name or "",
+            finding.rule_id or "",
+            finding.confidence or "",
+        )
+        for finding in findings
+    )
 
 
 def command_for_tool(tool: str, project: Project, cull: Path) -> list[str]:
@@ -583,14 +661,6 @@ def validate_command_run(tool: str, project: Project, run: CommandRun) -> None:
         )
     if run.stderr.strip():
         raise SystemExit(f"{tool} wrote stderr on {project.id}: {stderr_summary(run.stderr)}")
-
-
-def validate_parse_warnings(tool: str, project: Project, warnings: list[str]) -> None:
-    if warnings:
-        raise SystemExit(
-            f"{tool} output could not be fully parsed on {project.id}: "
-            + "; ".join(warnings[:3])
-        )
 
 
 def stderr_summary(stderr: str) -> str:
@@ -637,7 +707,7 @@ def run_command(command: list[str], timeout: float) -> CommandRun:
 
 
 def time_command(command: list[str]) -> list[str]:
-    if Path("/usr/bin/time").exists():
+    if sys.platform == "darwin" and Path("/usr/bin/time").exists():
         return ["/usr/bin/time", "-l", *command]
     return command
 
@@ -704,8 +774,8 @@ def parse_cull(stdout: str, *, include_review: bool = False) -> list[ToolFinding
         return []
     try:
         data = json.loads(stdout)
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"Cull JSON could not be parsed: {error}") from None
     findings = []
     for item in data.get("findings", []):
         confidence = item.get("confidence")
@@ -842,11 +912,6 @@ def parse_deadcode(stdout: str, project_root: Path) -> list[ToolFinding]:
 
 def collect_parse_warnings(tool: str, stdout: str) -> list[str]:
     if tool == "cull":
-        if stdout.strip():
-            try:
-                json.loads(stdout)
-            except json.JSONDecodeError as error:
-                return [f"Cull JSON could not be parsed: {error}"]
         return []
     if tool == "vulture":
         return unparsed_vulture_lines(stdout)
@@ -861,7 +926,13 @@ def unparsed_vulture_lines(stdout: str) -> list[str]:
         stripped = line.strip()
         if not stripped:
             continue
-        if VULTURE_RE.match(stripped) or VULTURE_UNREACHABLE_RE.match(stripped):
+        match = VULTURE_RE.match(stripped)
+        if match:
+            category = vulture_category(match.group("kind"), match.group("name"))
+            if category is None:
+                warnings.append(f"unsupported Vulture category: {stripped}")
+            continue
+        if VULTURE_UNREACHABLE_RE.match(stripped):
             continue
         warnings.append(stripped)
     return warnings
@@ -875,7 +946,13 @@ def unparsed_deadcode_lines(stdout: str) -> list[str]:
             continue
         if stripped.startswith("Well done!"):
             continue
-        if DEADCODE_RE.match(stripped) or DEADCODE_UNREACHABLE_RE.match(stripped):
+        match = DEADCODE_RE.match(stripped)
+        if match:
+            category = deadcode_category(match.group("kind"), match.group("name"))
+            if category is None:
+                warnings.append(f"unsupported deadcode category: {stripped}")
+            continue
+        if DEADCODE_UNREACHABLE_RE.match(stripped):
             continue
         warnings.append(stripped)
     return warnings
@@ -1154,6 +1231,7 @@ def collect_tool_metadata(repo_root: Path, cull: Path, tools: list[str]) -> dict
                 "role": "subject under evaluation",
                 "version": git_sha(repo_root) or "unknown",
                 "command": os.fspath(cull),
+                "binary_sha256": file_sha256(cull),
             }
         elif tool == "vulture":
             metadata[tool] = {
@@ -1197,6 +1275,8 @@ def environment(repo_root: Path, runs: int, warmups: int, timeout: float) -> dic
         "python": sys.version.split()[0],
         "rust_profile": "release",
         "cull_commit": git_sha(repo_root),
+        "git_dirty": git_dirty(repo_root),
+        "benchmark_runner_sha256": file_sha256(Path(__file__).resolve()),
         "runs": runs,
         "warmups": warmups,
         "timeout_seconds": timeout,
@@ -1251,8 +1331,55 @@ def git_sha(repo_root: Path) -> str | None:
     return completed.stdout.strip() or None
 
 
-def write_raw_output(raw_root: Path, tool: str, project: str, run: CommandRun) -> Path:
-    path = raw_root / tool / f"{project}.txt"
+def git_dirty(repo_root: Path) -> bool | None:
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return bool(completed.stdout.strip())
+
+
+def file_sha256(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def write_raw_outputs(
+    raw_root: Path,
+    tool: str,
+    project: str,
+    runs: list[CommandRun],
+) -> list[Path]:
+    return [
+        write_raw_output(raw_root, tool, project, run, run_index=index)
+        for index, run in enumerate(runs, start=1)
+    ]
+
+
+def write_raw_output(
+    raw_root: Path,
+    tool: str,
+    project: str,
+    run: CommandRun,
+    *,
+    run_index: int,
+) -> Path:
+    path = raw_root / tool / f"{project}-run-{run_index:02d}.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(

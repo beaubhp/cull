@@ -5,10 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description.workspace = true
 
 [dependencies]
 blake3.workspace = true
-cull-core = { path = "../cull-core" }
+cull-core = { version = "0.1.0", path = "../cull-core" }
 data-encoding.workspace = true
 globset.workspace = true
 ruff_python_ast.workspace = true

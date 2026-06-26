@@ -77,6 +77,27 @@ fn invalid_encoding_is_a_structured_diagnostic() {
 }
 
 #[test]
+fn second_line_encoding_cookie_after_code_is_ignored_like_cpython() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("bad.py"),
+        b"x = 1\n# coding: latin-1\nvalue = '\xe9'\n",
+    )
+    .unwrap();
+
+    let output = analyze_debug_definitions(DebugDefinitionsOptions {
+        project_root: temp.path().to_path_buf(),
+        source_roots: Vec::new(),
+        target_python: None,
+    })
+    .unwrap();
+
+    assert_eq!(output.diagnostics.len(), 1);
+    assert_eq!(output.diagnostics[0].code, "CULL_P0101");
+    assert!(output.modules.is_empty());
+}
+
+#[test]
 fn cpython_oracle_agrees_on_basic_top_level_definitions() {
     let source = fixture("basic").join("src/acme/cache.py");
     let oracle = Command::new("python3")
