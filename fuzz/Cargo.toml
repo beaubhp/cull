@@ -1,5 +1,5 @@
 [package]
-name = "cull-fuzz"
+name = "culler-fuzz"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -10,8 +10,8 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-cull-core = { version = "0.1.0", path = "../crates/cull-core" }
-cull-python = { version = "0.1.0", path = "../crates/cull-python" }
+culler-core = { version = "0.1.0", path = "../crates/culler-core" }
+culler-python = { version = "0.1.0", path = "../crates/culler-python" }
 libfuzzer-sys = "0.4"
 
 [[bin]]

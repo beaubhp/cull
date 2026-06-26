@@ -2,11 +2,11 @@
 
 use std::fs;
 
-use cull_python::{DebugDefinitionsOptions, analyze_debug_definitions};
+use culler_python::{DebugDefinitionsOptions, analyze_debug_definitions};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let root = std::env::temp_dir().join(format!("cull-fuzz-project-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("culler-fuzz-project-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     if fs::create_dir_all(&root).is_err() {
         return;

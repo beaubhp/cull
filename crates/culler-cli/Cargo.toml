@@ -1,0 +1,21 @@
+[package]
+name = "culler-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
+
+[[bin]]
+name = "culler"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+culler-core = { version = "0.1.0", path = "../culler-core" }
+culler-python = { version = "0.1.0", path = "../culler-python" }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

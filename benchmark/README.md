@@ -1,6 +1,6 @@
-# Cull Benchmark
+# Culler Benchmark
 
-This benchmark compares Cull with the two closest Python dead-code baselines:
+This benchmark compares Culler with the two closest Python dead-code baselines:
 Vulture and deadcode. It uses one fixed set of artificial but realistic Python
 projects with exact expected findings.
 
@@ -31,7 +31,7 @@ The required tools are:
 
 | Tool | Why included |
 | --- | --- |
-| Cull | Subject under evaluation. |
+| Culler | Subject under evaluation. |
 | Vulture | Classic Python dead-code detector. |
 | deadcode | Newer whole-codebase Python unused-code detector. |
 
@@ -98,7 +98,7 @@ and should not be edited to hide inconvenient tool output.
 The runner maps each tool's native output into the benchmark categories before
 scoring:
 
-| Benchmark category | Cull | Vulture | deadcode |
+| Benchmark category | Culler | Vulture | deadcode |
 | --- | --- | --- | --- |
 | `unused_import` | `CULL005` import bindings | unused `import` | `Import` |
 | `unused_local` | `CULL006` local bindings | unused `variable` | `Variable` / `Name` |
@@ -127,8 +127,8 @@ Matching is deterministic:
   unreachable range;
 - duplicate reports count once as a true positive and then as false positives.
 
-Cull's headline score uses high-confidence findings. The JSON and Markdown
-reports also include a clearly marked Cull high-plus-review aggregate.
+Culler's headline score uses high-confidence findings. The JSON and Markdown
+reports also include a clearly marked Culler high-plus-review aggregate.
 
 ## Runtime
 
@@ -142,7 +142,7 @@ The default policy is:
 - median measured wall time in the report;
 - same project path and machine for each tool;
 - no network access needed during benchmark execution after tools are available;
-- command lines, tool versions, Python version, OS, CPU, memory, and Cull commit
+- command lines, tool versions, Python version, OS, CPU, memory, and Culler commit
   recorded in the result JSON.
 
 Peak RSS is recorded on platforms where `/usr/bin/time -l` exposes it. If RSS is
@@ -153,7 +153,7 @@ unavailable, the result uses `null`.
 Prerequisites:
 
 - Python 3;
-- a release Cull binary when running Cull;
+- a release Culler binary when running Culler;
 - `uvx` when running the Vulture or deadcode baselines.
 
 The runner pins Vulture and deadcode in the command line. The first baseline run
@@ -172,17 +172,17 @@ Run runner self-tests:
 python3 benchmark/test_run.py
 ```
 
-Build Cull and run the full benchmark:
+Build Culler and run the full benchmark:
 
 ```bash
 cargo build --release
-python3 benchmark/run.py --cull target/release/cull --tools cull,vulture,deadcode --runs 5 --results benchmark/results/latest.json
+python3 benchmark/run.py --culler target/release/culler --tools culler,vulture,deadcode --runs 5 --results benchmark/results/latest.json
 ```
 
 During development, run a subset:
 
 ```bash
-python3 benchmark/run.py --cull target/release/cull --tools cull --runs 1 --project api_taskforge
+python3 benchmark/run.py --culler target/release/culler --tools culler --runs 1 --project api_taskforge
 ```
 
 Generated results are written under `benchmark/results/` and ignored by default.

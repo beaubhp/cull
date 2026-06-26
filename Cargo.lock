@@ -241,18 +241,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "cull-cli"
+name = "culler-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "cull-core",
- "cull-python",
+ "culler-core",
+ "culler-python",
  "serde_json",
  "tempfile",
 ]
 
 [[package]]
-name = "cull-core"
+name = "culler-core"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -260,11 +260,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "cull-python"
+name = "culler-python"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "cull-core",
+ "culler-core",
  "data-encoding",
  "globset",
  "ruff_python_ast",

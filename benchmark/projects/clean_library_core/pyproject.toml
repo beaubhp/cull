@@ -2,7 +2,7 @@
 name = "clean-library-core"
 version = "0.1.0"
 
-[tool.cull]
+[tool.culler]
 src = "src"
 mode = "library"
 root_coverage = "complete"

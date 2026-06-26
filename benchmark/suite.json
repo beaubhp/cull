@@ -1,5 +1,5 @@
 {
-  "description": "Cull benchmark: 15 artificial realistic Python projects with exact expected dead-code findings.",
+  "description": "Culler benchmark: 15 artificial realistic Python projects with exact expected dead-code findings.",
   "projects": [
     {
       "expected": "expected/api_taskforge.json",
@@ -159,8 +159,8 @@
   ],
   "schema_version": 1,
   "tools": {
-    "cull": {
-      "scope": "high-confidence Cull findings"
+    "culler": {
+      "scope": "high-confidence Culler findings"
     },
     "deadcode": {
       "scope": "parsed comparable dead-code findings",

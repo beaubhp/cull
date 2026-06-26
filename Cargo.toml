@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "crates/cull-cli",
-    "crates/cull-core",
-    "crates/cull-python",
+    "crates/culler-cli",
+    "crates/culler-core",
+    "crates/culler-python",
 ]
 resolver = "2"
 
@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
-repository = "https://github.com/beaubhp/cull"
+repository = "https://github.com/beaubhp/culler"
 description = "A precise Python dead-code analyzer."
 
 [workspace.dependencies]

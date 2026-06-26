@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Cull's public benchmark suite.
+"""Run Culler's public benchmark suite.
 
 The benchmark is intentionally dependency-free. Projects and expected findings
 are checked in; the runner only validates, executes tools, parses outputs, and
@@ -59,7 +59,7 @@ DEADCODE_UNREACHABLE_RE = re.compile(
 )
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 NORMAL_EXIT_CODES = {
-    "cull": {0, 1},
+    "culler": {0, 1},
     "vulture": {0, 3},
     "deadcode": {0},
 }
@@ -77,7 +77,7 @@ class ExpectedFinding:
     rationale: str
     qualified_name: str | None = None
     end_column: int | None = None
-    cull_rule: str | None = None
+    culler_rule: str | None = None
     tool_notes: str | None = None
 
 
@@ -128,14 +128,14 @@ class ProjectResult:
     project: Project
     expected: list[ExpectedFinding]
     tool_results: dict[str, dict[str, Any]] = field(default_factory=dict)
-    cull_high_plus_review: dict[str, Any] | None = None
+    culler_high_plus_review: dict[str, Any] | None = None
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", default="suite.json")
-    parser.add_argument("--cull", default="target/release/cull")
-    parser.add_argument("--tools", default="cull,vulture,deadcode")
+    parser.add_argument("--culler", default="target/release/culler")
+    parser.add_argument("--tools", default="culler,vulture,deadcode")
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=60.0)
@@ -181,7 +181,7 @@ def main() -> int:
         expected_by_project=expected_by_project,
         corpus=corpus,
         tools=tools,
-        cull=(repo_root / args.cull).resolve(),
+        culler=(repo_root / args.culler).resolve(),
         raw_root=result_path.parent / "raw" / result_path.stem,
         runs=args.runs,
         warmups=args.warmups,
@@ -205,7 +205,7 @@ def main() -> int:
 
 def parse_tools(value: str) -> list[str]:
     tools = [tool.strip() for tool in value.split(",") if tool.strip()]
-    allowed = {"cull", "vulture", "deadcode"}
+    allowed = {"culler", "vulture", "deadcode"}
     unknown = set(tools) - allowed
     if unknown:
         raise SystemExit(f"unknown benchmark tools: {', '.join(sorted(unknown))}")
@@ -230,8 +230,8 @@ def validate_runtime_args(args: argparse.Namespace, tools: list[str], repo_root:
         raise SystemExit("--warmups must be non-negative")
     if args.timeout <= 0:
         raise SystemExit("--timeout must be positive")
-    if "cull" in tools and not (repo_root / args.cull).exists():
-        raise SystemExit(f"Cull binary not found: {repo_root / args.cull}")
+    if "culler" in tools and not (repo_root / args.culler).exists():
+        raise SystemExit(f"Culler binary not found: {repo_root / args.culler}")
     if any(tool in tools for tool in ("vulture", "deadcode")) and shutil.which("uvx") is None:
         raise SystemExit("uvx is required to run Vulture/deadcode baselines")
 
@@ -304,7 +304,7 @@ def load_expected(path: Path) -> list[ExpectedFinding]:
                     item.get("qualified_name"), "qualified_name", context
                 ),
                 end_column=optional_int(item.get("end_column"), "end_column", context),
-                cull_rule=optional_string(item.get("cull_rule"), "cull_rule", context),
+                culler_rule=optional_string(item.get("culler_rule"), "culler_rule", context),
                 tool_notes=optional_string(item.get("tool_notes"), "tool_notes", context),
             )
         )
@@ -461,14 +461,14 @@ def run_benchmark(
     expected_by_project: dict[str, list[ExpectedFinding]],
     corpus: dict[str, Any],
     tools: list[str],
-    cull: Path,
+    culler: Path,
     raw_root: Path,
     runs: int,
     warmups: int,
     timeout: float,
 ) -> dict[str, Any]:
     prepare_raw_root(raw_root)
-    tool_metadata = collect_tool_metadata(repo_root, cull, tools)
+    tool_metadata = collect_tool_metadata(repo_root, culler, tools)
     project_results = []
 
     for project in projects:
@@ -478,7 +478,7 @@ def run_benchmark(
             run_result = run_tool_project(
                 tool=tool,
                 project=project,
-                cull=cull,
+                culler=culler,
                 runs=runs,
                 warmups=warmups,
                 timeout=timeout,
@@ -507,9 +507,9 @@ def run_benchmark(
                 "parse_warnings": parsed.parse_warnings,
                 "metrics": metrics,
             }
-            if tool == "cull":
+            if tool == "culler":
                 review_findings = parsed.review_findings or []
-                result.cull_high_plus_review = {
+                result.culler_high_plus_review = {
                     "finding_count": len(review_findings),
                     "metrics": score_findings(expected, review_findings),
                 }
@@ -517,7 +517,7 @@ def run_benchmark(
 
     result = {
         "schema_version": 1,
-        "suite": suite.get("description", "Cull benchmark"),
+        "suite": suite.get("description", "Culler benchmark"),
         "corpus": corpus,
         "environment": environment(repo_root, runs, warmups, timeout),
         "tools": tool_metadata,
@@ -526,8 +526,8 @@ def run_benchmark(
         "timing": timing_summary(project_results, tools),
         "projects": [serialize_project_result(result, tools) for result in project_results],
     }
-    if "cull" in tools:
-        result["cull_high_plus_review"] = aggregate_cull_review(project_results)
+    if "culler" in tools:
+        result["culler_high_plus_review"] = aggregate_culler_review(project_results)
     return result
 
 
@@ -541,12 +541,12 @@ def run_tool_project(
     *,
     tool: str,
     project: Project,
-    cull: Path,
+    culler: Path,
     runs: int,
     warmups: int,
     timeout: float,
 ) -> dict[str, Any]:
-    command = command_for_tool(tool, project, cull)
+    command = command_for_tool(tool, project, culler)
     for _ in range(warmups):
         validate_command_run(tool, project, run_command(command, timeout))
     measured = []
@@ -569,15 +569,15 @@ def parse_stable_tool_output(
             tool,
             run.stdout,
             project.path,
-            include_cull_review=False,
+            include_culler_review=False,
         )
         review_findings = None
-        if tool == "cull":
+        if tool == "culler":
             review_findings = parse_tool_findings(
                 tool,
                 run.stdout,
                 project.path,
-                include_cull_review=True,
+                include_culler_review=True,
             )
         parsed_runs.append(
             ParsedToolOutput(
@@ -626,11 +626,11 @@ def canonical_findings(
     )
 
 
-def command_for_tool(tool: str, project: Project, cull: Path) -> list[str]:
+def command_for_tool(tool: str, project: Project, culler: Path) -> list[str]:
     source_roots = [os.fspath(project.path / source) for source in project.source_roots]
-    if tool == "cull":
+    if tool == "culler":
         command = [
-            os.fspath(cull),
+            os.fspath(culler),
             "check",
             os.fspath(project.path),
             "--format",
@@ -758,10 +758,10 @@ def parse_tool_findings(
     stdout: str,
     project_root: Path,
     *,
-    include_cull_review: bool,
+    include_culler_review: bool,
 ) -> list[ToolFinding]:
-    if tool == "cull":
-        return parse_cull(stdout, include_review=include_cull_review)
+    if tool == "culler":
+        return parse_culler(stdout, include_review=include_culler_review)
     if tool == "vulture":
         return parse_vulture(stdout, project_root)
     if tool == "deadcode":
@@ -769,13 +769,13 @@ def parse_tool_findings(
     raise ValueError(tool)
 
 
-def parse_cull(stdout: str, *, include_review: bool = False) -> list[ToolFinding]:
+def parse_culler(stdout: str, *, include_review: bool = False) -> list[ToolFinding]:
     if not stdout.strip():
         return []
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError as error:
-        raise SystemExit(f"Cull JSON could not be parsed: {error}") from None
+        raise SystemExit(f"Culler JSON could not be parsed: {error}") from None
     findings = []
     for item in data.get("findings", []):
         confidence = item.get("confidence")
@@ -783,13 +783,13 @@ def parse_cull(stdout: str, *, include_review: bool = False) -> list[ToolFinding
             continue
         subject = item.get("subject", {})
         rule_id = item.get("rule_id")
-        category = cull_category(rule_id, subject)
+        category = culler_category(rule_id, subject)
         if category is None:
             continue
         path, line, name = subject_location(subject, category)
         findings.append(
             ToolFinding(
-                tool="cull",
+                tool="culler",
                 category=category,
                 path=path,
                 line=line,
@@ -802,7 +802,7 @@ def parse_cull(stdout: str, *, include_review: bool = False) -> list[ToolFinding
     return findings
 
 
-def cull_category(rule_id: str | None, subject: dict[str, Any]) -> str | None:
+def culler_category(rule_id: str | None, subject: dict[str, Any]) -> str | None:
     subject_kind = None
     if subject.get("subject_type") == "definition":
         subject_kind = subject.get("kind")
@@ -911,7 +911,7 @@ def parse_deadcode(stdout: str, project_root: Path) -> list[ToolFinding]:
 
 
 def collect_parse_warnings(tool: str, stdout: str) -> list[str]:
-    if tool == "cull":
+    if tool == "culler":
         return []
     if tool == "vulture":
         return unparsed_vulture_lines(stdout)
@@ -1104,12 +1104,12 @@ def aggregate_by_category(
     return categories
 
 
-def aggregate_cull_review(results: list[ProjectResult]) -> dict[str, Any]:
+def aggregate_culler_review(results: list[ProjectResult]) -> dict[str, Any]:
     return finalize_metric(
         [
-            result.cull_high_plus_review["metrics"]
+            result.culler_high_plus_review["metrics"]
             for result in results
-            if result.cull_high_plus_review is not None
+            if result.culler_high_plus_review is not None
         ]
     )
 
@@ -1169,8 +1169,8 @@ def serialize_project_result(result: ProjectResult, tools: list[str]) -> dict[st
             if tool in result.tool_results
         },
     }
-    if result.cull_high_plus_review is not None:
-        payload["cull_high_plus_review"] = result.cull_high_plus_review
+    if result.culler_high_plus_review is not None:
+        payload["culler_high_plus_review"] = result.culler_high_plus_review
     return payload
 
 
@@ -1223,15 +1223,15 @@ def deserialize_finding(record: dict[str, Any]) -> ToolFinding:
     )
 
 
-def collect_tool_metadata(repo_root: Path, cull: Path, tools: list[str]) -> dict[str, Any]:
+def collect_tool_metadata(repo_root: Path, culler: Path, tools: list[str]) -> dict[str, Any]:
     metadata = {}
     for tool in tools:
-        if tool == "cull":
+        if tool == "culler":
             metadata[tool] = {
                 "role": "subject under evaluation",
                 "version": git_sha(repo_root) or "unknown",
-                "command": os.fspath(cull),
-                "binary_sha256": file_sha256(cull),
+                "command": os.fspath(culler),
+                "binary_sha256": file_sha256(culler),
             }
         elif tool == "vulture":
             metadata[tool] = {
@@ -1274,7 +1274,7 @@ def environment(repo_root: Path, runs: int, warmups: int, timeout: float) -> dic
         "memory_total_bytes": memory_total_bytes(),
         "python": sys.version.split()[0],
         "rust_profile": "release",
-        "cull_commit": git_sha(repo_root),
+        "culler_commit": git_sha(repo_root),
         "git_dirty": git_dirty(repo_root),
         "benchmark_runner_sha256": file_sha256(Path(__file__).resolve()),
         "runs": runs,
@@ -1403,7 +1403,7 @@ def write_raw_output(
 
 def write_markdown(path: Path, result: dict[str, Any]) -> None:
     lines = [
-        "# Cull Benchmark Results",
+        "# Culler Benchmark Results",
         "",
         "## Aggregate",
         "",
@@ -1412,8 +1412,8 @@ def write_markdown(path: Path, result: dict[str, Any]) -> None:
     ]
     for tool, metrics in result["aggregate"].items():
         lines.append(metric_row(tool, metrics))
-    if "cull_high_plus_review" in result:
-        lines.append(metric_row("cull_high_plus_review", result["cull_high_plus_review"]))
+    if "culler_high_plus_review" in result:
+        lines.append(metric_row("culler_high_plus_review", result["culler_high_plus_review"]))
 
     lines.extend(
         [

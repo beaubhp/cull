@@ -2,7 +2,7 @@
 name = "ml-signal-lab"
 version = "0.1.0"
 
-[tool.cull]
+[tool.culler]
 src = "src"
 mode = "application"
 root_coverage = "complete"

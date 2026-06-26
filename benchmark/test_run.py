@@ -22,7 +22,7 @@ SPEC.loader.exec_module(benchmark_run)
 
 def finding(
     *,
-    tool: str = "cull",
+    tool: str = "culler",
     category: str = "unused_function",
     path: str = "src/pkg/mod.py",
     line: int = 3,
@@ -61,7 +61,7 @@ def expected(
 
 def command_run(
     *,
-    tool: str = "cull",
+    tool: str = "culler",
     exit_code: int = 0,
     stdout: str = "",
     stderr: str = "",
@@ -299,7 +299,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["recall"], 0.5)
         self.assertAlmostEqual(metrics["f1"], 0.5)
 
-    def test_parse_cull_output(self) -> None:
+    def test_parse_culler_output(self) -> None:
         output = {
             "findings": [
                 {
@@ -327,15 +327,15 @@ class BenchmarkRunnerTests(unittest.TestCase):
             ]
         }
 
-        high = benchmark_run.parse_cull(json.dumps(output), include_review=False)
-        reported = benchmark_run.parse_cull(json.dumps(output), include_review=True)
+        high = benchmark_run.parse_culler(json.dumps(output), include_review=False)
+        reported = benchmark_run.parse_culler(json.dumps(output), include_review=True)
 
         self.assertEqual([item.category for item in high], ["unused_import"])
         self.assertEqual([item.category for item in reported], ["unused_import", "unused_local"])
 
-    def test_malformed_cull_json_fails_closed(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "Cull JSON could not be parsed"):
-            benchmark_run.parse_cull("{not json", include_review=False)
+    def test_malformed_culler_json_fails_closed(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "Culler JSON could not be parsed"):
+            benchmark_run.parse_culler("{not json", include_review=False)
 
     def test_parse_stable_tool_output_rejects_nondeterministic_findings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -363,11 +363,11 @@ class BenchmarkRunnerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(SystemExit, "output changed across measured runs"):
                 benchmark_run.parse_stable_tool_output(
-                    tool="cull",
+                    tool="culler",
                     project=project,
                     runs=[
-                        command_run(tool="cull", stdout=first),
-                        command_run(tool="cull", stdout=second),
+                        command_run(tool="culler", stdout=first),
+                        command_run(tool="culler", stdout=second),
                     ],
                 )
 
@@ -407,9 +407,9 @@ class BenchmarkRunnerTests(unittest.TestCase):
             project = self.make_project(root)
 
             benchmark_run.validate_command_run(
-                "cull",
+                "culler",
                 project,
-                command_run(tool="cull", exit_code=1, stdout='{"findings": []}'),
+                command_run(tool="culler", exit_code=1, stdout='{"findings": []}'),
             )
             benchmark_run.validate_command_run(
                 "vulture",
@@ -441,11 +441,11 @@ class BenchmarkRunnerTests(unittest.TestCase):
                     command_run(tool="deadcode", stderr="unexpected warning"),
                 )
 
-            with self.assertRaisesRegex(SystemExit, "cull timed out"):
+            with self.assertRaisesRegex(SystemExit, "culler timed out"):
                 benchmark_run.validate_command_run(
-                    "cull",
+                    "culler",
                     project,
-                    command_run(tool="cull", exit_code=124, timed_out=True),
+                    command_run(tool="culler", exit_code=124, timed_out=True),
                 )
 
     def test_parse_warnings_include_unsupported_categories(self) -> None:
@@ -490,13 +490,13 @@ class BenchmarkRunnerTests(unittest.TestCase):
             raw_root = root / "results" / "raw" / "latest"
             path = benchmark_run.write_raw_output(
                 raw_root,
-                "cull",
+                "culler",
                 "case",
-                command_run(tool="cull", stdout="{}"),
+                command_run(tool="culler", stdout="{}"),
                 run_index=1,
             )
 
-        self.assertEqual(path.relative_to(root), Path("results/raw/latest/cull/case-run-01.txt"))
+        self.assertEqual(path.relative_to(root), Path("results/raw/latest/culler/case-run-01.txt"))
 
     def test_prepare_raw_root_removes_stale_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -513,11 +513,11 @@ class BenchmarkRunnerTests(unittest.TestCase):
     def test_markdown_and_json_report_generation_smoke(self) -> None:
         result = {
             "aggregate": {
-                "cull": {"tp": 1, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0, "f1": 1.0}
+                "culler": {"tp": 1, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0, "f1": 1.0}
             },
             "by_category": {
                 "unused_function": {
-                    "cull": {"tp": 1, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0, "f1": 1.0}
+                    "culler": {"tp": 1, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0, "f1": 1.0}
                 }
             },
             "projects": [
@@ -525,7 +525,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
                     "id": "case",
                     "expected_findings": 1,
                     "tools": {
-                        "cull": {
+                        "culler": {
                             "median_seconds": 0.01,
                             "max_rss_bytes": 123,
                             "metrics": {
@@ -543,7 +543,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
                 }
             ],
             "environment": {"python": "3.x"},
-            "tools": {"cull": {"version": "test", "command": "cull"}},
+            "tools": {"culler": {"version": "test", "command": "culler"}},
         }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -555,8 +555,8 @@ class BenchmarkRunnerTests(unittest.TestCase):
             loaded = json.loads(json_path.read_text(encoding="utf-8"))
             markdown = md_path.read_text(encoding="utf-8")
 
-        self.assertEqual(loaded["aggregate"]["cull"]["tp"], 1)
-        self.assertIn("Cull Benchmark Results", markdown)
+        self.assertEqual(loaded["aggregate"]["culler"]["tp"], 1)
+        self.assertIn("Culler Benchmark Results", markdown)
         self.assertIn("False Positives", markdown)
 
 

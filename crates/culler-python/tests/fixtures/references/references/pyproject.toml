@@ -1,0 +1,3 @@
+[tool.culler]
+src = "src"
+target-python = "3.14"

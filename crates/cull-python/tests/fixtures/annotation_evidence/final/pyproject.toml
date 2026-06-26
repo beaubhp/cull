@@ -1,4 +1,0 @@
-[tool.cull]
-src = ["src", "tests"]
-target-python = "3.14"
-tests = "tests"

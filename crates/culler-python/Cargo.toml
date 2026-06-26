@@ -1,0 +1,25 @@
+[package]
+name = "culler-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
+
+[dependencies]
+blake3.workspace = true
+culler-core = { version = "0.1.0", path = "../culler-core" }
+data-encoding.workspace = true
+globset.workspace = true
+ruff_python_ast.workspace = true
+ruff_python_parser.workspace = true
+ruff_text_size.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
