@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "culler"
 dynamic = ["version"]
-description = "A precise Python dead-code analyzer."
+description = "A fast, high-confidence Python dead-code analyzer."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

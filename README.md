@@ -29,7 +29,7 @@ culler check .
     <img
       width="49%"
       alt="Runtime benchmark comparing Culler, Vulture, and deadcode"
-      src="https://raw.githubusercontent.com/beaubhp/culler/main/benchmark/assets/runtime-dark.png"
+      src="https://raw.githubusercontent.com/beaubhp/culler/main/benchmark/assets/runtime-light.png"
     >
   </picture>
   <picture>
@@ -44,7 +44,7 @@ culler check .
     <img
       width="49%"
       alt="F1 benchmark comparing Culler high-plus-review, Culler, Vulture, and deadcode"
-      src="https://raw.githubusercontent.com/beaubhp/culler/main/benchmark/assets/f1-dark.png"
+      src="https://raw.githubusercontent.com/beaubhp/culler/main/benchmark/assets/f1-light.png"
     >
   </picture>
 </p>

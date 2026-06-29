@@ -12,7 +12,7 @@ edition = "2021"
 rust-version = "1.82"
 license = "MIT"
 repository = "https://github.com/beaubhp/culler"
-description = "A precise Python dead-code analyzer."
+description = "A fast, high-confidence Python dead-code analyzer."
 
 [workspace.dependencies]
 blake3 = "1.8.2"
