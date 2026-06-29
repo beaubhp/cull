@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "culler-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "culler-core",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "culler-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "culler-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "culler-core",
