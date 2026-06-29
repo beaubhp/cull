@@ -15,7 +15,7 @@ use culler_python::{
 #[derive(Debug, Parser)]
 #[command(name = "culler")]
 #[command(version)]
-#[command(about = "A precise Python dead-code analyzer.")]
+#[command(about = "A fast, high-confidence Python dead-code analyzer.")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
