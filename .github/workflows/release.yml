@@ -31,6 +31,52 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: .github/release-please/config.json
           manifest-file: .github/release-please/manifest.json
+      - name: Set up Rust for release PR lockfile
+        if: steps.release.outputs.prs_created == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Sync release PR Cargo.lock
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
+          PRS_JSON: ${{ steps.release.outputs.prs }}
+        run: |
+          set -euo pipefail
+
+          release_pr_json="${PR_JSON:-$PRS_JSON}"
+          if [ -z "$release_pr_json" ]; then
+            echo "Release Please did not expose release PR metadata." >&2
+            exit 1
+          fi
+
+          branch="$(
+            jq -r 'if type == "array" then .[0].headBranchName else .headBranchName end // empty' \
+              <<<"$release_pr_json"
+          )"
+          if [ -z "$branch" ]; then
+            echo "Release Please did not expose a release PR branch." >&2
+            exit 1
+          fi
+
+          git config --global user.name "release-please[bot]"
+          git config --global user.email "release-please[bot]@users.noreply.github.com"
+          git clone --branch "$branch" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "$RUNNER_TEMP/release-pr"
+          cd "$RUNNER_TEMP/release-pr"
+
+          cargo metadata --format-version 1 >/dev/null
+
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock already matches the release PR manifests."
+            exit 0
+          fi
+
+          git add Cargo.lock
+          git commit -m "chore: sync Cargo.lock for release"
+          git push origin "HEAD:$branch"
 
   linux-wheels:
     name: Linux wheels

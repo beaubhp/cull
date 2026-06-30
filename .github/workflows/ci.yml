@@ -31,7 +31,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check workspace
-        run: cargo check
+        run: cargo check --locked
       - name: Lint workspace
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test workspace
